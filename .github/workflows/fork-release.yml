@@ -6,6 +6,10 @@ on:
         description: 'Tag name for the release (e.g. v0.1.0-fork)'
         required: true
         default: 'v0.0.1-fork'
+      build_ref:
+        description: 'Git ref to build (branch, tag, or SHA)'
+        required: true
+        default: 'claude/agent-serde-deserialize-bug-xwfg7p'
 
 permissions:
   contents: write
@@ -23,6 +27,8 @@ jobs:
       CXX: clang++
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref }}
 
       - name: Install Linux dependencies
         run: |
@@ -73,6 +79,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
