@@ -1,0 +1,141 @@
+name: Fork Release Build
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for the release (e.g. v0.1.0-fork)'
+        required: true
+        default: 'v0.0.1-fork'
+      build_ref:
+        description: 'Git ref to build (branch, tag, or SHA)'
+        required: true
+        default: 'claude/agent-serde-deserialize-bug-xwfg7p'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev \
+            libglib2.0-dev libssl-dev libva-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libzstd-dev make cmake clang lld llvm mold
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Generate licenses
+        run: script/generate-licenses
+
+      - name: Build Zed (release)
+        env:
+          ZED_BUNDLE: true
+          RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
+          RUSTFLAGS: "-C link-args=-Wl,--disable-new-dtags,-rpath,\\$ORIGIN/../lib"
+        run: cargo build --release --package zed --package cli
+
+      - name: Package Linux artifact
+        run: |
+          target_triple=$(rustc --version --verbose | grep host | cut -d' ' -f2)
+          mkdir -p zed-linux-x86_64
+          cp target/release/zed zed-linux-x86_64/ || cp "target/${target_triple}/release/zed" zed-linux-x86_64/
+          cp target/release/cli zed-linux-x86_64/zed-cli || cp "target/${target_triple}/release/cli" zed-linux-x86_64/zed-cli || true
+          tar -czf zed-linux-x86_64.tar.gz zed-linux-x86_64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-x86_64
+          path: zed-linux-x86_64.tar.gz
+
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Generate licenses
+        run: script/generate-licenses
+
+      - name: Build Zed (release)
+        env:
+          ZED_BUNDLE: true
+          RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
+        run: cargo build --release --package zed --package cli
+
+      - name: Package macOS artifact
+        run: |
+          mkdir -p zed-macos-aarch64
+          cp target/release/zed zed-macos-aarch64/
+          cp target/release/cli zed-macos-aarch64/zed-cli || true
+          tar -czf zed-macos-aarch64.tar.gz zed-macos-aarch64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-macos-aarch64
+          path: zed-macos-aarch64.tar.gz
+
+  create-release:
+    needs: [build-linux-x86_64, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          name: "Zed (fork) ${{ github.event.inputs.tag_name }}"
+          body: |
+            Fork release build with agent serde deserialization fix.
+
+            **Changes:**
+            - Fix: Propagate serde errors from `ToolInput::recv()` instead of generic "tool input was not fully received" message.
+
+            When a model omits a required field (e.g. `cd` for the terminal tool), the error now reports exactly which field is missing instead of the generic message.
+          draft: false
+          prerelease: true
+          files: |
+            zed-linux-x86_64/zed-linux-x86_64.tar.gz
+            zed-macos-aarch64/zed-macos-aarch64.tar.gz
