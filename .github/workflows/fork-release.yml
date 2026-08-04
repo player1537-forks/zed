@@ -22,6 +22,8 @@ jobs:
   build-macos:
     runs-on: macos-15
     timeout-minutes: 150
+    env:
+      RUSTFLAGS: "-C opt-level=1"
     steps:
       - uses: actions/checkout@v4
         with:
