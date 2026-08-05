@@ -6229,6 +6229,95 @@ async fn test_subagent_thread_uses_configured_subagent_model(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+async fn test_subagent_thread_uses_configured_subagent_profile(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let parent_model = Arc::new(FakeLanguageModel::default());
+
+    cx.update(|cx| {
+        LanguageModelRegistry::test(cx);
+
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.subagent_profile = Some(AgentProfileId("ask".into()));
+        agent_settings::AgentSettings::override_global(settings, cx);
+    });
+
+    let parent_thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(parent_model.clone()),
+            cx,
+        )
+    });
+
+    parent_thread.read_with(cx, |thread, _cx| {
+        assert_eq!(thread.profile().as_str(), "write");
+    });
+
+    let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, cx));
+    subagent_thread.read_with(cx, |thread, _cx| {
+        assert_eq!(thread.profile().as_str(), "ask");
+    });
+}
+
+#[gpui::test]
+async fn test_subagent_profile_not_propagated_by_parent_set_profile(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let parent_model = Arc::new(FakeLanguageModel::default());
+
+    cx.update(|cx| {
+        LanguageModelRegistry::test(cx);
+
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.subagent_profile = Some(AgentProfileId("ask".into()));
+        agent_settings::AgentSettings::override_global(settings, cx);
+    });
+
+    let parent_thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(parent_model.clone()),
+            cx,
+        )
+    });
+
+    let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, cx));
+
+    parent_thread.update(cx, |parent_thread, _cx| {
+        parent_thread.register_running_subagent(subagent_thread.downgrade());
+    });
+
+    parent_thread.update(cx, |parent_thread, cx| {
+        parent_thread.set_profile(AgentProfileId("minimal".into()), cx);
+    });
+
+    subagent_thread.read_with(cx, |thread, _cx| {
+        assert_eq!(thread.profile().as_str(), "ask");
+    });
+}
+
+#[gpui::test]
 async fn test_max_subagent_depth_prevents_tool_registration(cx: &mut TestAppContext) {
     init_test(cx);
 
