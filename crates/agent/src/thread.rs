@@ -1341,6 +1341,7 @@ pub struct Thread {
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
     inherits_parent_model_settings: bool,
+    inherits_parent_profile: bool,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1390,6 +1391,14 @@ impl Thread {
         if let Some(model_selection) = model_selection {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&model_selection, cx);
+        }
+        if let Some(subagent_profile) = AgentSettings::get_global(cx).subagent_profile.clone() {
+            let project = &thread.project;
+            let (effective_profile, downgraded) =
+                Self::profile_for_restricted_workspace(subagent_profile, project, cx);
+            thread.profile_id = effective_profile;
+            thread.profile_downgraded_for_restricted_workspace = downgraded;
+            thread.inherits_parent_profile = false;
         }
         thread
     }
@@ -1489,6 +1498,7 @@ impl Thread {
             ui_scroll_position: None,
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
+            inherits_parent_profile: true,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
@@ -1864,6 +1874,7 @@ impl Thread {
             }),
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
+            inherits_parent_profile: true,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
@@ -2353,7 +2364,11 @@ impl Thread {
 
         for subagent in &self.running_subagents {
             subagent
-                .update(cx, |thread, cx| thread.set_profile(profile_id.clone(), cx))
+                .update(cx, |thread, cx| {
+                    if thread.inherits_parent_profile {
+                        thread.set_profile(profile_id.clone(), cx);
+                    }
+                })
                 .ok();
         }
     }

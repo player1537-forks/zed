@@ -286,6 +286,9 @@ pub struct AgentSettingsContent {
     /// thinking, effort, and speed settings when not specified. If the configured
     /// model is unavailable, the parent thread's model is used instead.
     pub subagent_model: Option<LanguageModelSelection>,
+    /// The profile to use for subagents spawned via the `spawn_agent` tool.
+    /// Defaults to the parent agent's profile when not specified.
+    pub subagent_profile: Option<Arc<str>>,
     /// Favorite models to show at the top of the model selector.
     #[serde(default)]
     pub favorite_models: Vec<LanguageModelSelection>,
