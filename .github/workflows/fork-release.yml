@@ -19,7 +19,50 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
-  build-linux-x86_64:
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 150
+    env:
+      RUSTFLAGS: "-C opt-level=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Bundle macOS
+        run: ./script/bundle-mac aarch64-apple-darwin
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zed-aarch64.dmg
+          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if-no-files-found: error
+
+      - name: Upload macOS remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-macos-aarch64.gz
+          path: target/zed-remote-server-macos-aarch64.gz
+          if-no-files-found: error
+
+  build-linux-remote-server-x86_64:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
@@ -37,10 +80,13 @@ jobs:
             gcc g++ libasound2-dev libfontconfig-dev libgit2-dev \
             libglib2.0-dev libssl-dev libva-dev libvulkan1 \
             libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
-            libzstd-dev make cmake clang lld llvm mold
+            libzstd-dev make cmake clang lld llvm mold musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -53,47 +99,51 @@ jobs:
       - name: Generate licenses
         run: script/generate-licenses
 
-      - name: Build Zed (release)
+      - name: Build remote server
         env:
           ZED_BUNDLE: true
           RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
-          RUSTFLAGS: "-C link-args=-Wl,--disable-new-dtags,-rpath,\\$ORIGIN/../lib"
-        run: |
-          cargo build --release --package zed --package cli
-          cargo build --release --package remote_server
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl --package remote_server
 
-      - name: Package Linux artifact
+      - name: Package remote server
         run: |
-          target_triple=$(rustc --version --verbose | grep host | cut -d' ' -f2)
-          mkdir -p zed-linux-x86_64
-          cp target/release/zed zed-linux-x86_64/ || cp "target/${target_triple}/release/zed" zed-linux-x86_64/
-          cp target/release/cli zed-linux-x86_64/zed-cli || cp "target/${target_triple}/release/cli" zed-linux-x86_64/zed-cli || true
-          tar -czf zed-linux-x86_64.tar.gz zed-linux-x86_64/
-          gzip -f --stdout --best target/release/remote_server > zed-remote-server-linux-x86_64.gz
+          llvm-objcopy --strip-debug target/x86_64-unknown-linux-musl/release/remote_server
+          gzip -f --stdout --best target/x86_64-unknown-linux-musl/release/remote_server > target/zed-remote-server-linux-x86_64.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zed-linux-x86_64
-          path: |
-            zed-linux-x86_64.tar.gz
-            zed-remote-server-linux-x86_64.gz
+          name: zed-remote-server-linux-x86_64.gz
+          path: target/zed-remote-server-linux-x86_64.gz
+          if-no-files-found: error
 
-  build-macos:
-    runs-on: macos-15
-    timeout-minutes: 180
+  build-linux-remote-server-aarch64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      CC: clang
+      CXX: clang++
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.build_ref }}
 
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev \
+            libglib2.0-dev libssl-dev libva-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libzstd-dev make cmake clang lld llvm mold musl-tools
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Add musl target
+        run: rustup target add aarch64-unknown-linux-musl
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -103,27 +153,38 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Bundle macOS
+      - name: Generate licenses
+        run: script/generate-licenses
+
+      - name: Build remote server
         env:
           ZED_BUNDLE: true
           RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
-          RUSTFLAGS: "-C opt-level=1"
-        run: ./script/bundle-mac aarch64-apple-darwin
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl --package remote_server
 
-      - name: Upload DMG
+      - name: Package remote server
+        run: |
+          llvm-objcopy --strip-debug target/aarch64-unknown-linux-musl/release/remote_server
+          gzip -f --stdout --best target/aarch64-unknown-linux-musl/release/remote_server > target/zed-remote-server-linux-aarch64.gz
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zed-macos-aarch64
-          path: |
-            target/aarch64-apple-darwin/release/Zed-aarch64.dmg
-            target/zed-remote-server-macos-aarch64.gz
+          name: zed-remote-server-linux-aarch64.gz
+          path: target/zed-remote-server-linux-aarch64.gz
+          if-no-files-found: error
 
   create-release:
-    needs: [build-linux-x86_64, build-macos]
+    needs: [build-macos, build-linux-remote-server-x86_64, build-linux-remote-server-aarch64]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+
+      - name: List artifacts
+        run: ls -lR
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -132,10 +193,16 @@ jobs:
           name: "Zed (fork) ${{ github.event.inputs.tag_name }}"
           body: |
             Fork release build.
+
+            **Artifacts:**
+            - `Zed-aarch64.dmg` - macOS app (Apple Silicon)
+            - `zed-remote-server-macos-aarch64.gz` - macOS remote server (Apple Silicon)
+            - `zed-remote-server-linux-aarch64.gz` - Linux remote server (aarch64)
+            - `zed-remote-server-linux-x86_64.gz` - Linux remote server (x86_64)
           draft: false
           prerelease: true
           files: |
-            zed-linux-x86_64/zed-linux-x86_64.tar.gz
-            zed-linux-x86_64/zed-remote-server-linux-x86_64.gz
-            zed-macos-aarch64/Zed-aarch64.dmg
-            zed-macos-aarch64/zed-remote-server-macos-aarch64.gz
+            Zed-aarch64.dmg/Zed-aarch64.dmg
+            zed-remote-server-macos-aarch64.gz/zed-remote-server-macos-aarch64.gz
+            zed-remote-server-linux-aarch64.gz/zed-remote-server-linux-aarch64.gz
+            zed-remote-server-linux-x86_64.gz/zed-remote-server-linux-x86_64.gz
