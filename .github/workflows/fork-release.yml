@@ -9,7 +9,7 @@ on:
       build_ref:
         description: 'Git ref to build (branch, tag, or SHA)'
         required: true
-        default: 'claude/agent-serde-deserialize-bug-xwfg7p'
+        default: 'main'
 
 permissions:
   contents: write
@@ -58,7 +58,9 @@ jobs:
           ZED_BUNDLE: true
           RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
           RUSTFLAGS: "-C link-args=-Wl,--disable-new-dtags,-rpath,\\$ORIGIN/../lib"
-        run: cargo build --release --package zed --package cli
+        run: |
+          cargo build --release --package zed --package cli
+          cargo build --release --package remote_server
 
       - name: Package Linux artifact
         run: |
@@ -67,12 +69,15 @@ jobs:
           cp target/release/zed zed-linux-x86_64/ || cp "target/${target_triple}/release/zed" zed-linux-x86_64/
           cp target/release/cli zed-linux-x86_64/zed-cli || cp "target/${target_triple}/release/cli" zed-linux-x86_64/zed-cli || true
           tar -czf zed-linux-x86_64.tar.gz zed-linux-x86_64/
+          gzip -f --stdout --best target/release/remote_server > zed-remote-server-linux-x86_64.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: zed-linux-x86_64
-          path: zed-linux-x86_64.tar.gz
+          path: |
+            zed-linux-x86_64.tar.gz
+            zed-remote-server-linux-x86_64.gz
 
   build-macos:
     runs-on: macos-15
@@ -109,7 +114,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zed-macos-aarch64
-          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          path: |
+            target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+            target/zed-remote-server-macos-aarch64.gz
 
   create-release:
     needs: [build-linux-x86_64, build-macos]
@@ -129,4 +136,6 @@ jobs:
           prerelease: true
           files: |
             zed-linux-x86_64/zed-linux-x86_64.tar.gz
+            zed-linux-x86_64/zed-remote-server-linux-x86_64.gz
             zed-macos-aarch64/Zed-aarch64.dmg
+            zed-macos-aarch64/zed-remote-server-macos-aarch64.gz
