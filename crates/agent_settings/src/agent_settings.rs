@@ -219,6 +219,7 @@ pub struct AgentSettings {
     pub max_content_width: Option<Pixels>,
     pub default_model: Option<LanguageModelSelection>,
     pub subagent_model: Option<LanguageModelSelection>,
+    pub subagent_profile: Option<AgentProfileId>,
     pub inline_assistant_model: Option<LanguageModelSelection>,
     pub inline_assistant_use_streaming_tools: bool,
     pub commit_message_model: Option<LanguageModelSelection>,
@@ -794,6 +795,7 @@ impl Settings for AgentSettings {
             flexible: agent.flexible.unwrap(),
             default_model: Some(agent.default_model.unwrap()),
             subagent_model: agent.subagent_model,
+            subagent_profile: agent.subagent_profile.map(AgentProfileId),
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent
                 .inline_assistant_use_streaming_tools
