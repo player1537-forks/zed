@@ -76,7 +76,7 @@ jobs:
 
   build-macos:
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,6 +84,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -93,27 +98,18 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Generate licenses
-        run: script/generate-licenses
-
-      - name: Build Zed (release)
+      - name: Bundle macOS
         env:
           ZED_BUNDLE: true
           RELEASE_VERSION: ${{ github.event.inputs.tag_name }}
-        run: cargo build --release --package zed --package cli
+          RUSTFLAGS: "-C opt-level=1"
+        run: ./script/bundle-mac aarch64-apple-darwin
 
-      - name: Package macOS artifact
-        run: |
-          mkdir -p zed-macos-aarch64
-          cp target/release/zed zed-macos-aarch64/
-          cp target/release/cli zed-macos-aarch64/zed-cli || true
-          tar -czf zed-macos-aarch64.tar.gz zed-macos-aarch64/
-
-      - name: Upload artifact
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: zed-macos-aarch64
-          path: zed-macos-aarch64.tar.gz
+          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
 
   create-release:
     needs: [build-linux-x86_64, build-macos]
@@ -128,14 +124,9 @@ jobs:
           tag_name: ${{ github.event.inputs.tag_name }}
           name: "Zed (fork) ${{ github.event.inputs.tag_name }}"
           body: |
-            Fork release build with agent serde deserialization fix.
-
-            **Changes:**
-            - Fix: Propagate serde errors from `ToolInput::recv()` instead of generic "tool input was not fully received" message.
-
-            When a model omits a required field (e.g. `cd` for the terminal tool), the error now reports exactly which field is missing instead of the generic message.
+            Fork release build.
           draft: false
           prerelease: true
           files: |
             zed-linux-x86_64/zed-linux-x86_64.tar.gz
-            zed-macos-aarch64/zed-macos-aarch64.tar.gz
+            zed-macos-aarch64/Zed-aarch64.dmg
