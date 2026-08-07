@@ -37,6 +37,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Set release channel to dev
+        run: echo -n dev > crates/zed/RELEASE_CHANNEL
+
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
@@ -92,6 +95,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+
+      - name: Set release channel to dev
+        run: echo -n dev > crates/zed/RELEASE_CHANNEL
 
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
@@ -149,6 +155,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+
+      - name: Set release channel to dev
+        run: echo -n dev > crates/zed/RELEASE_CHANNEL
 
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
