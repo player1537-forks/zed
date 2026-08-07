@@ -5018,7 +5018,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 ## Title Bar
 
-- Description: Whether or not to show various elements in the title bar
+- Description: Configuration for the title bar, including visibility of elements and custom colors
 - Setting: `title_bar`
 - Default:
 
@@ -5041,6 +5041,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 **Options**
 
+- `background`: Background color of the title bar. Accepts hex colors like `"#FF0000"` or `"#FF0000FF"`. This setting can be used in project-level `.zed/settings.json` to visually distinguish different projects.
 - `show_branch_status_icon`: Whether to show git status indicators on the branch icon in the titlebar
 - `show_branch_name`: Whether to show the branch name button in the titlebar
 - `show_worktree_name`: Whether to show the worktree name button in the titlebar
