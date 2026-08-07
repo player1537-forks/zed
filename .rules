@@ -186,3 +186,7 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+# Fork build guidelines
+
+* Fork release builds (`fork-release.yml`) must always produce **Zed Dev** builds, not preview/stable/nightly. The release channel is determined at compile time by `crates/zed/RELEASE_CHANNEL`. When rebasing onto upstream tags (which may set this file to `preview` or `stable`), the workflow must override it to `dev` before building. This is already handled in `fork-release.yml` via the "Set release channel to dev" step in each job.
