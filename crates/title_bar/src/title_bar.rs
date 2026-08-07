@@ -38,7 +38,7 @@ use project::{
     trusted_worktrees::TrustedWorktrees,
 };
 use remote::RemoteConnectionOptions;
-use settings::{Settings as _, SettingsStore};
+use settings::{Settings as _, SettingsLocation, SettingsStore};
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -51,6 +51,7 @@ use ui::{
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
+use util::rel_path::RelPath;
 use workspace::{
     AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
     notifications::{NotifyResultExt, NotifyTaskExt as _},
@@ -224,7 +225,27 @@ impl Render for TitleBar {
             }
         }
 
-        let title_bar_settings = *TitleBarSettings::get_global(cx);
+        // Get settings location from first visible worktree for local settings override
+        let settings_location =
+            self.project
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .map(|worktree| {
+                    let worktree = worktree.read(cx);
+                    SettingsLocation {
+                        worktree_id: worktree.id(),
+                        path: RelPath::empty(),
+                    }
+                });
+
+        let title_bar_settings = TitleBarSettings::get(settings_location, cx).clone();
+
+        // Set background override on platform titlebar
+        self.platform_titlebar.update(cx, |titlebar, _| {
+            titlebar.set_background_override(title_bar_settings.background);
+        });
+
         let button_layout = title_bar_settings.button_layout;
         let is_git_enabled = ProjectSettings::get_global(cx).git.enabled.status;
 

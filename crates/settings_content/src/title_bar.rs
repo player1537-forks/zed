@@ -127,4 +127,11 @@ pub struct TitleBarSettingsContent {
     ///
     /// Default: "platform_default"
     pub button_layout: Option<WindowButtonLayoutContent>,
+
+    /// Background color of the title bar.
+    /// Overrides the theme's title_bar.background color.
+    /// Accepts hex colors like "#FF0000" or "#FF0000FF".
+    ///
+    /// Default: null (uses theme color)
+    pub background: Option<String>,
 }
