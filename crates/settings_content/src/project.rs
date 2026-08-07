@@ -14,7 +14,7 @@ use util::serde::default_true;
 
 use crate::{
     AllLanguageSettingsContent, DelayMs, ExtendingVec, ParseStatus, ProjectTerminalSettingsContent,
-    RootUserSettings, SaturatingBool, SplicingVec, fallible_options,
+    RootUserSettings, SaturatingBool, SplicingVec, TitleBarSettingsContent, fallible_options,
 };
 
 #[with_fallible_options]
@@ -85,12 +85,16 @@ pub struct ProjectSettingsContent {
     ///
     /// Default: false
     pub disable_ai: Option<SaturatingBool>,
+
+    /// Configuration for the title bar.
+    pub title_bar: Option<TitleBarSettingsContent>,
 }
 
 crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     sections: { all_languages, worktree },
     options: {
         terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
+        title_bar,
     },
     defaults: { lsp, dap, context_servers },
 });

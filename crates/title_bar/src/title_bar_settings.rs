@@ -1,7 +1,8 @@
-use gpui::WindowButtonLayout;
+use gpui::{Hsla, WindowButtonLayout};
 use settings::{RegisterSetting, Settings, SettingsContent};
+use theme::try_parse_color;
 
-#[derive(Copy, Clone, Debug, RegisterSetting)]
+#[derive(Clone, Debug, RegisterSetting)]
 pub struct TitleBarSettings {
     pub show_branch_status_icon: bool,
     pub show_onboarding_banner: bool,
@@ -14,6 +15,7 @@ pub struct TitleBarSettings {
     pub show_menus: bool,
     pub open_menus_on_hover: bool,
     pub button_layout: Option<WindowButtonLayout>,
+    pub background: Option<Hsla>,
 }
 
 impl Settings for TitleBarSettings {
@@ -31,6 +33,10 @@ impl Settings for TitleBarSettings {
             show_menus: content.show_menus.unwrap(),
             open_menus_on_hover: content.open_menus_on_hover.unwrap(),
             button_layout: content.button_layout.unwrap_or_default().into_layout(),
+            background: content
+                .background
+                .as_ref()
+                .and_then(|c| try_parse_color(c).ok()),
         }
     }
 }
