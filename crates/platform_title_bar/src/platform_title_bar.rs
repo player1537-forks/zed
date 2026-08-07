@@ -33,6 +33,7 @@ pub struct PlatformTitleBar {
     system_window_tabs: Entity<SystemWindowTabs>,
     button_layout: Option<WindowButtonLayout>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+    override_background: Option<Hsla>,
 }
 
 impl PlatformTitleBar {
@@ -48,6 +49,7 @@ impl PlatformTitleBar {
             system_window_tabs,
             button_layout: None,
             multi_workspace: None,
+            override_background: None,
         }
     }
 
@@ -60,7 +62,15 @@ impl PlatformTitleBar {
         self.multi_workspace = Some(multi_workspace);
     }
 
+    pub fn set_background_override(&mut self, color: Option<Hsla>) {
+        self.override_background = color;
+    }
+
     pub fn title_bar_color(&self, window: &mut Window, cx: &mut Context<Self>) -> Hsla {
+        if let Some(override_color) = self.override_background {
+            return override_color;
+        }
+
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if window.is_window_active() && !self.should_move {
                 cx.theme().colors().title_bar_background
