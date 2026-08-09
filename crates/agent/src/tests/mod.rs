@@ -526,17 +526,9 @@ async fn test_thinking_allowed_when_model_cannot_disable_thinking(cx: &mut TestA
 
 #[gpui::test]
 async fn test_system_prompt(cx: &mut TestAppContext) {
-    let ThreadTest {
-        model,
-        thread,
-        project_context,
-        ..
-    } = setup(cx, TestModel::Fake).await;
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
     let fake_model = model.as_fake();
 
-    project_context.update(cx, |project_context, _cx| {
-        project_context.shell = "test-shell".into()
-    });
     thread.update(cx, |thread, _| thread.add_tool(EchoTool));
     thread
         .update(cx, |thread, cx| {
@@ -560,8 +552,8 @@ async fn test_system_prompt(cx: &mut TestAppContext) {
         panic!("Expected text content");
     };
     assert!(
-        system_prompt.contains("test-shell"),
-        "unexpected system message: {:?}",
+        system_prompt.contains("The current project contains the following root directories"),
+        "system prompt should contain worktree paths: {:?}",
         system_message
     );
     assert!(
