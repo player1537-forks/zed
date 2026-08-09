@@ -6164,6 +6164,9 @@ pub mod test {
             SkillSource::ProjectLocal {
                 worktree_id: SkillScopeId(worktree_id.to_usize()),
                 worktree_root_name: "project".into(),
+                relative_path: RelPath::from_unix_str(".agents/skills/s/SKILL.md")
+                    .unwrap()
+                    .into(),
             },
         )
         .await
