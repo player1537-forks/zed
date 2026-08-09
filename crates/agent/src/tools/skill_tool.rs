@@ -248,6 +248,7 @@ mod tests {
     use settings::{Settings, SettingsStore};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use util::rel_path::RelPath;
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -541,6 +542,11 @@ mod tests {
             SkillSource::ProjectLocal {
                 worktree_id: SkillScopeId(worktree_id.to_usize()),
                 worktree_root_name,
+                relative_path: RelPath::from_unix_str(
+                    ".agents/skills/project-skill/SKILL.md",
+                )
+                .unwrap()
+                .into(),
             },
         )
         .unwrap();
