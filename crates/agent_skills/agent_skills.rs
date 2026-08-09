@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use url::Url;
 use util::paths::component_matches_ignore_ascii_case;
+use util::rel_path::RelPath;
 
 /// First segment of the skills directory path: `.agents`.
 pub const AGENTS_DIR_NAME: &str = ".agents";
@@ -105,6 +106,13 @@ pub enum SkillSource {
     ProjectLocal {
         worktree_id: SkillScopeId,
         worktree_root_name: Arc<str>,
+        /// Worktree-relative path to the SKILL.md file, stored at
+        /// discovery time so the body resolver can open the buffer
+        /// without reconstructing the path from the absolute path.
+        /// This avoids a `strip_prefix` that can fail when the
+        /// worktree root representation changes between discovery and
+        /// invocation (e.g. on remote/SSH projects).
+        relative_path: Arc<RelPath>,
     },
 }
 
@@ -867,6 +875,9 @@ mod tests {
         let project = SkillSource::ProjectLocal {
             worktree_id: SkillScopeId(1),
             worktree_root_name: "my-project".into(),
+            relative_path: RelPath::from_unix_str(".agents/skills/s/SKILL.md")
+                .unwrap()
+                .into(),
         }
         .precedence();
 
@@ -880,6 +891,9 @@ mod tests {
         let other_project = SkillSource::ProjectLocal {
             worktree_id: SkillScopeId(2),
             worktree_root_name: "other-project".into(),
+            relative_path: RelPath::from_unix_str(".agents/skills/s/SKILL.md")
+                .unwrap()
+                .into(),
         }
         .precedence();
         assert_eq!(project, other_project);
