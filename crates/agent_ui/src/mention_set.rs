@@ -505,6 +505,30 @@ impl MentionSet {
                 tracked_buffers: Vec::new(),
             }));
         }
+
+        // Resolve project-local skills through the project's buffer store
+        // so the read works for remote SSH projects where the file path
+        // refers to the remote host, not the local machine.
+        if let Some(project) = self.project.upgrade() {
+            let project_path = project
+                .read(cx)
+                .project_path_for_absolute_path(&skill_file_path, cx);
+            if let Some(project_path) = project_path {
+                let buffer =
+                    project.update(cx, |project, cx| project.open_buffer(project_path, cx));
+                return cx.spawn(async move |_, cx| {
+                    let buffer = buffer.await?;
+                    let content = buffer.read_with(cx, |buffer, _| buffer.text());
+                    Ok(Mention::Text {
+                        content,
+                        tracked_buffers: vec![buffer],
+                    })
+                });
+            }
+        }
+
+        // Fallback for global skills and any project-local skills that
+        // couldn't be resolved through the project (e.g., worktree closed).
         cx.background_spawn(async move {
             let content = std::fs::read_to_string(&skill_file_path).map_err(|e| {
                 anyhow!(
