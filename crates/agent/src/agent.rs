@@ -1100,10 +1100,7 @@ impl NativeAgent {
                     let skill_files = worktree.update(cx, |worktree, _cx| {
                         project_skill_files_from_worktree(worktree)
                     });
-                    let source = SkillSource::ProjectLocal {
-                        worktree_id: SkillScopeId(worktree_id.to_usize()),
-                        worktree_root_name,
-                    };
+                    let scope_id = SkillScopeId(worktree_id.to_usize());
 
                     let mut worktree_results = Vec::new();
                     for skill_file in skill_files {
@@ -1140,11 +1137,16 @@ impl NativeAgent {
                         let content = cx
                             .update(|cx| buffer.read(cx).as_text_snapshot().as_rope().to_string());
 
+                        let source = SkillSource::ProjectLocal {
+                            worktree_id: scope_id,
+                            worktree_root_name: worktree_root_name.clone(),
+                            relative_path: skill_file.relative_path.clone(),
+                        };
                         worktree_results.push(
                             parse_skill_frontmatter(
                                 &skill_file.display_path,
                                 &content,
-                                source.clone(),
+                                source,
                             )
                             .map_err(|error| SkillLoadError {
                                 path: skill_file.display_path,
@@ -1452,6 +1454,7 @@ impl NativeAgent {
                     SkillSource::ProjectLocal {
                         worktree_id,
                         worktree_root_name,
+                        ..
                     } => {
                         if let Some(group) = project_groups
                             .iter_mut()
@@ -3620,7 +3623,11 @@ pub fn skill_body_resolver_for_project(
     fs: Arc<dyn Fs>,
 ) -> impl Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync + 'static {
     move |skill, cx| match skill.source.clone() {
-        SkillSource::ProjectLocal { worktree_id, .. } => {
+        SkillSource::ProjectLocal {
+            worktree_id,
+            relative_path,
+            ..
+        } => {
             let project = project.clone();
             cx.spawn(async move |cx| {
                 let worktree_id = WorktreeId::from_usize(worktree_id.0);
@@ -3628,14 +3635,6 @@ pub fn skill_body_resolver_for_project(
                     .update(cx, |project, cx| project.worktree_for_id(worktree_id, cx))
                     .context("no such worktree")?;
                 expand_project_skills_directories(&worktree, cx).await?;
-                let relative_path = worktree.update(cx, |worktree, _cx| {
-                    let worktree_root = worktree.abs_path();
-                    worktree
-                        .path_style()
-                        .strip_prefix(&skill.skill_file_path, &worktree_root)
-                        .map(|relative_path| relative_path.into_arc())
-                        .context("skill file is not inside its worktree")
-                })?;
 
                 let buffer = project
                     .update(cx, |project, cx| {
@@ -4048,6 +4047,11 @@ mod internal_tests {
             source: SkillSource::ProjectLocal {
                 worktree_id: SkillScopeId(1),
                 worktree_root_name: worktree.into(),
+                relative_path: RelPath::from_unix_str(&format!(
+                    ".agents/skills/{name}/SKILL.md"
+                ))
+                .unwrap()
+                .into(),
             },
             directory_path: PathBuf::from(format!("/{worktree}/.agents/skills/{name}")),
             skill_file_path: PathBuf::from(format!("/{worktree}/.agents/skills/{name}/SKILL.md")),
@@ -4203,6 +4207,9 @@ mod internal_tests {
         let project = SkillSource::ProjectLocal {
             worktree_id: SkillScopeId(1),
             worktree_root_name: "zed".into(),
+            relative_path: RelPath::from_unix_str(".agents/skills/s/SKILL.md")
+                .unwrap()
+                .into(),
         };
         // Project-local skills are scoped by their worktree root name
         // so multiple open worktrees with same-named skills can each
@@ -4221,6 +4228,9 @@ mod internal_tests {
         let project_named_global = SkillSource::ProjectLocal {
             worktree_id: SkillScopeId(2),
             worktree_root_name: "global".into(),
+            relative_path: RelPath::from_unix_str(".agents/skills/s/SKILL.md")
+                .unwrap()
+                .into(),
         };
         assert_eq!(project_named_global.scope_prefix(), "global");
         assert!(project_named_global.matches_scope("global"));
