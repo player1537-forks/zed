@@ -121,17 +121,6 @@ Give the best answer you can from the available context. If you need the user to
 If the user references a file, function, type, command, or other project-specific item that is not present in the provided context, do not invent details or assume how it works. Ask for clarification or ask the user to provide the relevant content.
 {{/if}}
 
-## System Information
-
-Operating System: {{os}}
-Default Shell: {{shell}}
-Today's Date: {{date}}
-
-The current project contains the following root directories:
-
-{{#each worktrees}}
-- `{{abs_path}}`
-{{/each}}
 
 {{#if model_name}}
 ## Model Information
