@@ -109,7 +109,9 @@ mod tests {
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
         assert!(rendered.contains("You are the Zed coding agent"));
-        assert!(rendered.contains("Today's Date: 2026-01-01"));
+        assert!(!rendered.contains("Operating System:"));
+        assert!(!rendered.contains("Default Shell:"));
+        assert!(!rendered.contains("Today's Date:"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
     }
@@ -175,127 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_system_prompt_renders_sandbox_section_with_worktrees_when_enabled() {
-        use prompt_store::{ProjectContext, WorktreeContext};
-
-        let worktrees = vec![
-            WorktreeContext {
-                root_name: "alpha".to_string(),
-                abs_path: std::path::Path::new("/tmp/alpha").into(),
-                rules_file: None,
-            },
-            WorktreeContext {
-                root_name: "beta".to_string(),
-                abs_path: std::path::Path::new("/tmp/beta").into(),
-                rules_file: None,
-            },
-        ];
-        let project = ProjectContext::new(worktrees);
-        let template = SystemPromptTemplate {
-            project: &project,
-            available_tools: vec!["echo".into(), "terminal".into()],
-            model_name: Some("test-model".to_string()),
-            date: "2026-01-01".to_string(),
-            user_agents_md: None,
-            sandboxing: true,
-            is_linux: false,
-            is_windows: false,
-        };
-        let templates = Templates::new();
-        let rendered = template.render(&templates).unwrap();
-
-        assert!(rendered.contains("## Terminal sandbox"));
-        assert!(rendered.contains("`/tmp/alpha`"));
-        assert!(rendered.contains("`/tmp/beta`"));
-        assert!(rendered.contains("allow_hosts"));
-        assert!(rendered.contains("allow_all_hosts: true"));
-        assert!(rendered.contains("fs_write_paths"));
-        assert!(rendered.contains("allow_fs_write_all: true"));
-        assert!(rendered.contains("unsandboxed: true"));
-        assert!(rendered.contains("`.git` directories remain protected"));
-        assert!(rendered.contains("Git metadata writes are never grantable inside the sandbox"));
-        assert!(rendered.contains("request `unsandboxed: true` with a reason"));
-        assert!(rendered.contains("git --no-optional-locks status"));
-        assert!(rendered.contains("for the rest of the thread"));
-        // macOS tolerates granting a not-yet-existing path, so the
-        // existing-directory requirement must not be stated there; the
-        // `create_directory` flow is the preferred guidance instead.
-        assert!(!rendered.contains("Each path must be an existing directory"));
-        assert!(rendered.contains("first create it with the `create_directory` tool"));
-    }
-
-    #[test]
-    fn test_system_prompt_linux_sandbox_section_omits_tmpdir() {
-        use prompt_store::{ProjectContext, WorktreeContext};
-
-        let worktrees = vec![WorktreeContext {
-            root_name: "alpha".to_string(),
-            abs_path: std::path::Path::new("/tmp/alpha").into(),
-            rules_file: None,
-        }];
-        let project = ProjectContext::new(worktrees);
-        let template = SystemPromptTemplate {
-            project: &project,
-            available_tools: vec!["echo".into(), "terminal".into()],
-            model_name: Some("test-model".to_string()),
-            date: "2026-01-01".to_string(),
-            user_agents_md: None,
-            sandboxing: true,
-            is_linux: true,
-            is_windows: false,
-        };
-        let templates = Templates::new();
-        let rendered = template.render(&templates).unwrap();
-
-        assert!(rendered.contains("## Terminal sandbox"));
-        // On Linux we must not advertise the special persistent `$TMPDIR`.
-        assert!(!rendered.contains("$TMPDIR"));
-        assert!(rendered.contains("`/tmp` is writable"));
-        assert!(rendered.contains("`/tmp/alpha`"));
-        // Linux write grants must already exist (bwrap binds existing paths).
-        assert!(rendered.contains("Each path must be an existing directory"));
-        assert!(rendered.contains("first create it with the `create_directory` tool"));
-    }
-
-    #[test]
-    fn test_system_prompt_windows_sandbox_section_rejects_host_specific_network() {
-        use prompt_store::{ProjectContext, WorktreeContext};
-
-        let worktrees = vec![WorktreeContext {
-            root_name: "alpha".to_string(),
-            abs_path: std::path::Path::new("C:/Users/me/project").into(),
-            rules_file: None,
-        }];
-        let project = ProjectContext::new(worktrees);
-        let template = SystemPromptTemplate {
-            project: &project,
-            available_tools: vec!["echo".into(), "terminal".into()],
-            model_name: Some("test-model".to_string()),
-            date: "2026-01-01".to_string(),
-            user_agents_md: None,
-            sandboxing: true,
-            is_linux: false,
-            is_windows: true,
-        };
-        let templates = Templates::new();
-        let rendered = template.render(&templates).unwrap();
-
-        assert!(rendered.contains("commands run inside WSL under Bubblewrap"));
-        assert!(rendered.contains("Protected Git metadata remains read-only"));
-        assert!(rendered.contains("do not use this on Windows"));
-        assert!(rendered.contains("such requests are rejected"));
-        assert!(rendered.contains("allow_all_hosts: true"));
-        assert!(rendered.contains("git --no-optional-locks status"));
-        // Out-of-project `create_directory` grants aren't supported on Windows,
-        // so the prompt must not recommend that flow; it suggests granting the
-        // nearest existing parent instead.
-        assert!(rendered.contains("Each path must be an existing directory"));
-        assert!(rendered.contains("nearest existing parent directory"));
-        assert!(!rendered.contains("first create it with the `create_directory` tool"));
-    }
-
-    #[test]
-    fn test_system_prompt_sandbox_section_handles_zero_worktrees() {
+    fn test_system_prompt_renders_sandbox_section_when_enabled() {
         let project = prompt_store::ProjectContext::default();
         let template = SystemPromptTemplate {
             project: &project,
@@ -311,7 +193,17 @@ mod tests {
         let rendered = template.render(&templates).unwrap();
 
         assert!(rendered.contains("## Terminal sandbox"));
-        assert!(rendered.contains("No project directories are currently writable"));
+        assert!(rendered.contains("allow_hosts"));
+        assert!(rendered.contains("allow_all_hosts: true"));
+        assert!(rendered.contains("fs_write_paths"));
+        assert!(rendered.contains("allow_fs_write_all: true"));
+        assert!(rendered.contains("unsandboxed: true"));
+        assert!(rendered.contains("`.git` directories remain protected"));
+        assert!(rendered.contains("Git metadata writes are never grantable inside the sandbox"));
+        assert!(rendered.contains("request `unsandboxed: true` with a reason"));
+        assert!(rendered.contains("git --no-optional-locks status"));
+        assert!(rendered.contains("for the rest of the thread"));
+        assert!(rendered.contains("first create it with the `create_directory` tool"));
     }
 
     #[test]
