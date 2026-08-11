@@ -1,5 +1,4 @@
 use agent_client_protocol::schema::v1 as acp;
-use anyhow::Result;
 use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Entity, SharedString, Task};
 use project::Project;
@@ -29,8 +28,6 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
 ///
-/// Always set the working directory with the `cd` parameter, never with `cd` inside `command`; otherwise it will error.
-///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values yourself before calling this tool, or ask the user for the literal value to use.
 ///
 /// Do not pipe output to `head`, `tail`, or similar output-filtering commands just to reduce what you receive. Instead, use `head_lines` and/or `tail_lines`; this keeps the terminal output visible to the user in real time while limiting only the final output sent back to you. When both are specified, the first `head_lines` lines are returned, then a blank line, then the last `tail_lines` lines. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -53,8 +50,6 @@ pub struct TerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory: a project root directory or any subdirectory of one, given by name or absolute path. E.g. `my-project/src`, `/home/user/my-project`, or on Windows `my-project\src` or `C:\Users\me\my-project`.
-    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
     /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -70,8 +65,6 @@ pub struct TerminalToolInput {
 /// This tool spawns a process using the user's shell, reads from stdout and stderr (preserving the order of writes), and returns a string with the combined output result.
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
-///
-/// Always set the working directory with the `cd` parameter, never with `cd` inside `command`; otherwise it will error.
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values first or ask the user for the literal value to use.
 ///
@@ -95,8 +88,6 @@ pub struct SandboxedTerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory: a project root directory or any subdirectory of one, given by name or absolute path. E.g. `my-project/src`, `/home/user/my-project`, or on Windows `my-project\src` or `C:\Users\me\my-project`.
-    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
     /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -219,7 +210,6 @@ struct TerminalSandboxInput {
 
 struct TerminalToolRequest {
     command: String,
-    cd: String,
     timeout_ms: Option<u64>,
     selection: TerminalOutputSelection,
     sandbox: Option<TerminalSandboxInput>,
@@ -229,7 +219,6 @@ impl From<TerminalToolInput> for TerminalToolRequest {
     fn from(input: TerminalToolInput) -> Self {
         Self {
             command: input.command,
-            cd: input.cd,
             timeout_ms: input.timeout_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
@@ -244,7 +233,6 @@ impl From<SandboxedTerminalToolInput> for TerminalToolRequest {
     fn from(input: SandboxedTerminalToolInput) -> Self {
         Self {
             command: input.command,
-            cd: input.cd,
             timeout_ms: input.timeout_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
@@ -423,26 +411,28 @@ async fn run_terminal_tool(
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
-    let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) =
-        cx.update(|cx| {
-            let working_dir =
-                working_dir(&input.cd, &project, cx).map_err(|err| err.to_string())?;
-            let context =
-                crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
-            let authorize =
-                event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
-            let sandboxing =
-                input.sandbox.is_some() && sandboxing_enabled_for_project(project.read(cx), cx);
-            let is_local_project = project.read(cx).is_local();
-            let wsl_zed_release = wsl_zed_release(cx);
-            Result::<_, String>::Ok((
-                working_dir,
-                authorize,
-                sandboxing,
-                is_local_project,
-                wsl_zed_release,
-            ))
-        })?;
+    let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) = cx.update(|cx| {
+        let working_dir = project
+            .read(cx)
+            .worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+        let context =
+            crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
+        let authorize =
+            event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
+        let sandboxing =
+            input.sandbox.is_some() && sandboxing_enabled_for_project(project.read(cx), cx);
+        let is_local_project = project.read(cx).is_local();
+        let wsl_zed_release = wsl_zed_release(cx);
+        (
+            working_dir,
+            authorize,
+            sandboxing,
+            is_local_project,
+            wsl_zed_release,
+        )
+    });
 
     authorize.await.map_err(|e| e.to_string())?;
 
@@ -1338,212 +1328,15 @@ fn process_content(
     content
 }
 
-fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Option<PathBuf>> {
-    let project = project.read(cx);
-
-    if cd == "." || cd.is_empty() {
-        let mut worktrees = project.worktrees(cx);
-
-        match worktrees.next() {
-            Some(worktree) => {
-                anyhow::ensure!(
-                    worktrees.next().is_none(),
-                    "'.' is ambiguous in multi-root workspaces. Please specify a root directory explicitly.",
-                );
-                Ok(Some(worktree.read(cx).abs_path().to_path_buf()))
-            }
-            None => Ok(None),
-        }
-    } else {
-        let path_style = project.path_style(cx);
-        let worktree_roots = project
-            .worktrees(cx)
-            .filter_map(|worktree| {
-                let worktree = worktree.read(cx);
-                // Skip single-file worktrees: a file can't be a working directory.
-                let root_dir = worktree.root_dir()?;
-                Some((worktree.root_name_str(), root_dir.to_path_buf()))
-            })
-            .collect::<Vec<_>>();
-
-        if let Some(dir) = resolve_cd_in_worktrees(cd, path_style, &worktree_roots) {
-            return Ok(Some(dir));
-        }
-
-        anyhow::bail!("`cd` directory {cd:?} was not in any root directory in the project.");
-    }
-}
-
-/// Resolves a `cd` argument to an absolute worktree directory. `cd` may be a
-/// worktree's root name or an absolute path to a worktree or a subdirectory
-/// therein.
-///
-/// Absolute paths are classified with the project's [`PathStyle`] rather than
-/// the host's, so an absolute POSIX path resolves correctly on a Windows host
-/// driving a WSL/SSH project (#60040).
-///
-/// Both `cd` and the worktree roots are lexically normalized before prefix
-/// matching. This resolves `.` and `..` components up front, so a path that
-/// escapes a worktree does not have that worktree's root as a prefix and is
-/// rejected (#60014). On Windows-style projects it also unifies `/` and `\`
-/// separators, since models frequently write `C:/foo/bar` for a root stored
-/// as `C:\foo\bar`.
-fn resolve_cd_in_worktrees(
-    cd: &str,
-    path_style: util::paths::PathStyle,
-    worktree_roots: &[(&str, PathBuf)],
-) -> Option<PathBuf> {
-    let cd = path_style.normalize(cd);
-    let cd_path = Path::new(&cd);
-    let is_absolute = path_style.is_absolute(&cd);
-
-    worktree_roots.iter().find_map(|(root_name, abs_path)| {
-        let prefix = if is_absolute {
-            path_style.normalize(abs_path.to_str()?)
-        } else {
-            (*root_name).to_string()
-        };
-        let subpath = path_style.strip_prefix(cd_path, Path::new(&prefix))?;
-        if subpath.is_empty() {
-            Some(abs_path.clone())
-        } else {
-            path_style
-                .join_path(abs_path, &*subpath.display(path_style))
-                .ok()
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_resolve_cd_uses_project_path_style() {
-        use util::paths::PathStyle::{Unix, Windows};
-
-        // Deliberately ambiguous root names to stress test path resolution.
-        let unix_roots: Vec<(&str, PathBuf)> = vec![
-            ("worktree", PathBuf::from("/a/worktree")),
-            ("worktree", PathBuf::from("/b/worktree")),
-        ];
-        // Worktree roots are stored with backslash separators on Windows, but
-        // models frequently write paths with forward slashes; both must match.
-        let windows_roots = vec![("worktree", PathBuf::from("C:\\work\\worktree"))];
-
-        // absolute paths
-        assert_eq!(
-            resolve_cd_in_worktrees("/b/worktree", Unix, &unix_roots),
-            Some(PathBuf::from("/b/worktree")),
-            "a POSIX-absolute path resolves under a POSIX project path style even on a Windows host"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/a/worktree/src", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree/src")),
-            "an absolute path inside a worktree resolves to the same path"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/elsewhere", Unix, &unix_roots),
-            None,
-            "an absolute path outside every worktree is rejected"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/a/worktree/src/../docs", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree/docs")),
-            "an absolute path that stays within its worktree via `..` resolves to the same path"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/a/worktree/../escape", Unix, &unix_roots),
-            None,
-            "an absolute path that escapes its worktree via `..` is rejected"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/a/worktree/../../b/worktree", Unix, &unix_roots),
-            Some(PathBuf::from("/b/worktree")),
-            "a path whose `..` components lexically resolve into a valid worktree is accepted"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("/a/worktree//src/", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree/src")),
-            "doubled and trailing separators are normalized away"
-        );
-
-        // relative root names
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree")),
-            "a root-relative path to a worktree root resolves to the first matching worktree"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree/src", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree/src")),
-            "a root-relative path to a subdirectory resolves to the absolute path"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree/src/../doc", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree/doc")),
-            "a root-relative path to a subdirectory with `..` resolves to a clean absolute path"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree/../escape", Unix, &unix_roots),
-            None,
-            "a root-relative path that escapes the worktree via `..` is rejected"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktreeextra", Unix, &unix_roots),
-            None,
-            "a root-relative path that is not any of the worktree roots is rejected"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("./worktree", Unix, &unix_roots),
-            Some(PathBuf::from("/a/worktree")),
-            "a leading `./` is normalized away"
-        );
-
-        // Windows paths
-        assert_eq!(
-            resolve_cd_in_worktrees("C:\\work\\worktree", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree")),
-            "Windows-absolute paths to root directories resolve"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("C:/work/worktree", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree")),
-            "forward-slash separators match a backslash-stored root"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("c:\\work\\worktree", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree")),
-            "drive letters match case-insensitively"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("C:/work/worktree/src", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree\\src")),
-            "Windows-absolute paths to subdirectories resolve regardless of separator style"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree\\src", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree\\src")),
-            "Windows-relative paths to subdirectories resolve to the absolute path"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("worktree/src", Windows, &windows_roots),
-            Some(PathBuf::from("C:\\work\\worktree\\src")),
-            "forward-slash relative paths resolve under a Windows path style"
-        );
-        assert_eq!(
-            resolve_cd_in_worktrees("C:\\work\\worktree\\..\\escape", Windows, &windows_roots),
-            None,
-            "a Windows-absolute path that escapes its worktree via `..` is rejected"
-        );
-    }
 
     #[test]
     fn test_initial_title_shows_full_multiline_command() {
         let input = TerminalToolInput {
             command: "(nix run nixpkgs#hello > /tmp/nix-server.log 2>&1 &)\nsleep 5\ncat /tmp/nix-server.log\npkill -f \"node.*index.js\" || echo \"No server process found\""
                 .to_string(),
-            cd: ".".to_string(),
             timeout_ms: None,
                 ..Default::default()
             };
@@ -1609,7 +1402,6 @@ mod tests {
         for cmd in dangerous_commands {
             let input = TerminalToolInput {
                 command: cmd.to_string(),
-                cd: ".".to_string(),
                 timeout_ms: None,
                 ..Default::default()
             };
@@ -1647,7 +1439,6 @@ mod tests {
     fn test_initial_title_single_line_command() {
         let input = TerminalToolInput {
             command: "echo 'hello world'".to_string(),
-            cd: ".".to_string(),
             timeout_ms: None,
             ..Default::default()
         };
@@ -1677,7 +1468,6 @@ mod tests {
 
         let input = TerminalToolInput {
             command: long_command,
-            cd: ".".to_string(),
             timeout_ms: None,
             ..Default::default()
         };
@@ -2149,7 +1939,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $HOME".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2217,7 +2006,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $HOME".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2279,7 +2067,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $(rm -rf /)".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2349,7 +2136,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=blah git log --oneline".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2416,7 +2202,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "printf lines".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     head_lines: Some(1),
                     tail_lines: Some(1),
@@ -2475,7 +2260,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo output".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2535,7 +2319,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=blah git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2669,7 +2452,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: command.to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2837,7 +2619,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $(whoami)".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2910,7 +2691,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=other git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2977,7 +2757,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "A=1 B=2 git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -3055,7 +2834,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=\"less -R\" git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -3237,7 +3015,6 @@ mod tests {
         // interprets as "no escalation requested").
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": ".",
         }))
         .expect("minimal input should deserialize");
         assert!(input.allow_hosts.is_empty());
@@ -3251,7 +3028,6 @@ mod tests {
     fn test_legacy_allow_fs_write_aliases_to_allow_fs_write_all() {
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": ".",
             "allow_fs_write": true,
         }))
         .expect("legacy allow_fs_write should deserialize");
@@ -3289,7 +3065,6 @@ mod tests {
         let (event_stream, mut receiver) = crate::ToolCallEventStream::test();
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
             "allow_fs_write": true,
             "reason": "needs to write outside the project",
         }))
@@ -3381,7 +3156,6 @@ mod tests {
         let (event_stream, mut receiver) = crate::ToolCallEventStream::test();
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
             "allow_all_hosts": true,
             "allow_fs_write_all": true,
             "unsandboxed": true,
@@ -3486,7 +3260,6 @@ mod tests {
 
         let input = serde_json::json!({
             "command": "touch build/output",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "reason": "needs to write build artifacts",
         });
@@ -3632,7 +3405,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
         }))
         .unwrap();
         let task = cx.update(|cx| tool.run(crate::ToolInput::resolved(input), event_stream, cx));
@@ -3659,7 +3431,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "touch build/out",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "allow_all_hosts": true,
             "reason": "write build artifacts",
@@ -3700,7 +3471,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "touch build/out",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "reason": "write build artifacts",
         }))
@@ -3730,7 +3500,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "curl https://github.com",
-            "cd": "root",
             "allow_hosts": ["github.com"],
             "reason": "fetch from github",
         }))
