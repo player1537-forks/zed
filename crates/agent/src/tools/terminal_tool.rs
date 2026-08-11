@@ -1,5 +1,4 @@
 use agent_client_protocol::schema::v1 as acp;
-use anyhow::Result;
 use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Entity, SharedString, Task};
 use project::Project;
@@ -29,8 +28,6 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
 ///
-/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project. NEVER do it as part of the `command` itself, otherwise it will error.
-///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values yourself before calling this tool, or ask the user for the literal value to use.
 ///
 /// Do not pipe output to `head`, `tail`, or similar output-filtering commands just to reduce what you receive. Instead, use `head_lines` and/or `tail_lines`; this keeps the terminal output visible to the user in real time while limiting only the final output sent back to you. When both are specified, the first `head_lines` lines are returned, then a blank line, then the last `tail_lines` lines. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -53,8 +50,6 @@ pub struct TerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory for the command. This must be one of the root directories of the project.
-    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
     /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -70,8 +65,6 @@ pub struct TerminalToolInput {
 /// This tool spawns a process using the user's shell, reads from stdout and stderr (preserving the order of writes), and returns a string with the combined output result.
 ///
 /// The output results will be shown to the user already, only list it again if necessary, avoid being redundant.
-///
-/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project. NEVER do it as part of the `command` itself, otherwise it will error.
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values first or ask the user for the literal value to use.
 ///
@@ -95,8 +88,6 @@ pub struct SandboxedTerminalToolInput {
     ///
     /// REMINDER: read-only git commands (`git log`, `git diff`, `git show`, `git blame`) MUST include `--no-pager` (e.g. `git --no-pager log`). Prefer `git --no-optional-locks status` over `git status` to avoid optional metadata writes. Git commands that may open an editor (`git rebase`, `git commit`, `git merge`, `git tag`) MUST be prefixed with `GIT_EDITOR=true ` (e.g. `GIT_EDITOR=true git rebase origin/main`). Otherwise the terminal will hang.
     pub command: String,
-    /// Working directory for the command. This must be one of the root directories of the project.
-    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
     /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
@@ -219,7 +210,6 @@ struct TerminalSandboxInput {
 
 struct TerminalToolRequest {
     command: String,
-    cd: String,
     timeout_ms: Option<u64>,
     selection: TerminalOutputSelection,
     sandbox: Option<TerminalSandboxInput>,
@@ -229,7 +219,6 @@ impl From<TerminalToolInput> for TerminalToolRequest {
     fn from(input: TerminalToolInput) -> Self {
         Self {
             command: input.command,
-            cd: input.cd,
             timeout_ms: input.timeout_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
@@ -244,7 +233,6 @@ impl From<SandboxedTerminalToolInput> for TerminalToolRequest {
     fn from(input: SandboxedTerminalToolInput) -> Self {
         Self {
             command: input.command,
-            cd: input.cd,
             timeout_ms: input.timeout_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
@@ -423,26 +411,28 @@ async fn run_terminal_tool(
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
-    let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) =
-        cx.update(|cx| {
-            let working_dir =
-                working_dir(&input.cd, &project, cx).map_err(|err| err.to_string())?;
-            let context =
-                crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
-            let authorize =
-                event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
-            let sandboxing =
-                input.sandbox.is_some() && sandboxing_enabled_for_project(project.read(cx), cx);
-            let is_local_project = project.read(cx).is_local();
-            let wsl_zed_release = wsl_zed_release(cx);
-            Result::<_, String>::Ok((
-                working_dir,
-                authorize,
-                sandboxing,
-                is_local_project,
-                wsl_zed_release,
-            ))
-        })?;
+    let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) = cx.update(|cx| {
+        let working_dir = project
+            .read(cx)
+            .worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+        let context =
+            crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
+        let authorize =
+            event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
+        let sandboxing =
+            input.sandbox.is_some() && sandboxing_enabled_for_project(project.read(cx), cx);
+        let is_local_project = project.read(cx).is_local();
+        let wsl_zed_release = wsl_zed_release(cx);
+        (
+            working_dir,
+            authorize,
+            sandboxing,
+            is_local_project,
+            wsl_zed_release,
+        )
+    });
 
     authorize.await.map_err(|e| e.to_string())?;
 
@@ -1338,40 +1328,6 @@ fn process_content(
     content
 }
 
-fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Option<PathBuf>> {
-    let project = project.read(cx);
-
-    if cd == "." || cd.is_empty() {
-        let mut worktrees = project.worktrees(cx);
-
-        match worktrees.next() {
-            Some(worktree) => {
-                anyhow::ensure!(
-                    worktrees.next().is_none(),
-                    "'.' is ambiguous in multi-root workspaces. Please specify a root directory explicitly.",
-                );
-                Ok(Some(worktree.read(cx).abs_path().to_path_buf()))
-            }
-            None => Ok(None),
-        }
-    } else {
-        let input_path = Path::new(cd);
-
-        if input_path.is_absolute() {
-            if project
-                .worktrees(cx)
-                .any(|worktree| input_path.starts_with(&worktree.read(cx).abs_path()))
-            {
-                return Ok(Some(input_path.into()));
-            }
-        } else if let Some(worktree) = project.worktree_for_root_name(cd, cx) {
-            return Ok(Some(worktree.read(cx).abs_path().to_path_buf()));
-        }
-
-        anyhow::bail!("`cd` directory {cd:?} was not in any of the project's worktrees.");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1381,7 +1337,6 @@ mod tests {
         let input = TerminalToolInput {
             command: "(nix run nixpkgs#hello > /tmp/nix-server.log 2>&1 &)\nsleep 5\ncat /tmp/nix-server.log\npkill -f \"node.*index.js\" || echo \"No server process found\""
                 .to_string(),
-            cd: ".".to_string(),
             timeout_ms: None,
                 ..Default::default()
             };
@@ -1447,7 +1402,6 @@ mod tests {
         for cmd in dangerous_commands {
             let input = TerminalToolInput {
                 command: cmd.to_string(),
-                cd: ".".to_string(),
                 timeout_ms: None,
                 ..Default::default()
             };
@@ -1485,7 +1439,6 @@ mod tests {
     fn test_initial_title_single_line_command() {
         let input = TerminalToolInput {
             command: "echo 'hello world'".to_string(),
-            cd: ".".to_string(),
             timeout_ms: None,
             ..Default::default()
         };
@@ -1515,7 +1468,6 @@ mod tests {
 
         let input = TerminalToolInput {
             command: long_command,
-            cd: ".".to_string(),
             timeout_ms: None,
             ..Default::default()
         };
@@ -1987,7 +1939,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $HOME".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2055,7 +2006,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $HOME".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2117,7 +2067,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $(rm -rf /)".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2187,7 +2136,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=blah git log --oneline".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2254,7 +2202,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "printf lines".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     head_lines: Some(1),
                     tail_lines: Some(1),
@@ -2313,7 +2260,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo output".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2373,7 +2319,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=blah git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2507,7 +2452,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: command.to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2675,7 +2619,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "echo $(whoami)".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2748,7 +2691,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=other git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2815,7 +2757,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "A=1 B=2 git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -2893,7 +2834,6 @@ mod tests {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
                     command: "PAGER=\"less -R\" git log".to_string(),
-                    cd: "root".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -3075,7 +3015,6 @@ mod tests {
         // interprets as "no escalation requested").
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": ".",
         }))
         .expect("minimal input should deserialize");
         assert!(input.allow_hosts.is_empty());
@@ -3089,7 +3028,6 @@ mod tests {
     fn test_legacy_allow_fs_write_aliases_to_allow_fs_write_all() {
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": ".",
             "allow_fs_write": true,
         }))
         .expect("legacy allow_fs_write should deserialize");
@@ -3127,7 +3065,6 @@ mod tests {
         let (event_stream, mut receiver) = crate::ToolCallEventStream::test();
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
             "allow_fs_write": true,
             "reason": "needs to write outside the project",
         }))
@@ -3219,7 +3156,6 @@ mod tests {
         let (event_stream, mut receiver) = crate::ToolCallEventStream::test();
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
             "allow_all_hosts": true,
             "allow_fs_write_all": true,
             "unsandboxed": true,
@@ -3324,7 +3260,6 @@ mod tests {
 
         let input = serde_json::json!({
             "command": "touch build/output",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "reason": "needs to write build artifacts",
         });
@@ -3470,7 +3405,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "echo hi",
-            "cd": "root",
         }))
         .unwrap();
         let task = cx.update(|cx| tool.run(crate::ToolInput::resolved(input), event_stream, cx));
@@ -3497,7 +3431,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "touch build/out",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "allow_all_hosts": true,
             "reason": "write build artifacts",
@@ -3538,7 +3471,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "touch build/out",
-            "cd": "root",
             "fs_write_paths": ["build"],
             "reason": "write build artifacts",
         }))
@@ -3568,7 +3500,6 @@ mod tests {
 
         let input: SandboxedTerminalToolInput = serde_json::from_value(serde_json::json!({
             "command": "curl https://github.com",
-            "cd": "root",
             "allow_hosts": ["github.com"],
             "reason": "fetch from github",
         }))
