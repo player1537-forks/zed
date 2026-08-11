@@ -4542,7 +4542,6 @@ mod internal_tests {
             tool.run(
                 ToolInput::resolved(SandboxedTerminalToolInput {
                     command: "read -r line </dev/tty".to_string(),
-                    cd: temp_dir.path().to_string_lossy().into_owned(),
                     ..Default::default()
                 }),
                 event_stream,

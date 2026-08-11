@@ -388,7 +388,6 @@ async fn test_terminal_tool_timeout_kills_handle(cx: &mut TestAppContext) {
         tool.run(
             ToolInput::resolved(crate::TerminalToolInput {
                 command: "sleep 1000".to_string(),
-                cd: ".".to_string(),
                 timeout_ms: Some(5),
                 ..Default::default()
             }),
@@ -456,7 +455,6 @@ async fn test_terminal_tool_without_timeout_does_not_kill_handle(cx: &mut TestAp
         tool.run(
             ToolInput::resolved(crate::TerminalToolInput {
                 command: "sleep 1000".to_string(),
-                cd: ".".to_string(),
                 timeout_ms: None,
                 ..Default::default()
             }),
@@ -2702,9 +2700,9 @@ async fn test_terminal_tool_cancellation_captures_output(cx: &mut TestAppContext
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_1".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 1000", "cd": "."}"#.into(),
+            raw_input: r#"{"command": "sleep 1000"}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 1000", "cd": "."}),
+                json!({"command": "sleep 1000"}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -2998,9 +2996,9 @@ async fn test_truncate_while_terminal_tool_running(cx: &mut TestAppContext) {
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_1".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 1000", "cd": "."}"#.into(),
+            raw_input: r#"{"command": "sleep 1000"}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 1000", "cd": "."}),
+                json!({"command": "sleep 1000"}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -3070,9 +3068,9 @@ async fn test_cancel_multiple_concurrent_terminal_tools(cx: &mut TestAppContext)
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_1".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 1000", "cd": "."}"#.into(),
+            raw_input: r#"{"command": "sleep 1000"}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 1000", "cd": "."}),
+                json!({"command": "sleep 1000"}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -3083,9 +3081,9 @@ async fn test_cancel_multiple_concurrent_terminal_tools(cx: &mut TestAppContext)
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_2".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 2000", "cd": "."}"#.into(),
+            raw_input: r#"{"command": "sleep 2000"}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 2000", "cd": "."}),
+                json!({"command": "sleep 2000"}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -3192,9 +3190,9 @@ async fn test_terminal_tool_stopped_via_terminal_card_button(cx: &mut TestAppCon
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_1".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 1000", "cd": "."}"#.into(),
+            raw_input: r#"{"command": "sleep 1000"}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 1000", "cd": "."}),
+                json!({"command": "sleep 1000"}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -3297,9 +3295,9 @@ async fn test_terminal_tool_timeout_expires(cx: &mut TestAppContext) {
         LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
             id: "terminal_tool_1".into(),
             name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command": "sleep 1000", "cd": ".", "timeout_ms": 100}"#.into(),
+            raw_input: r#"{"command": "sleep 1000", "timeout_ms": 100}"#.into(),
             input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "sleep 1000", "cd": ".", "timeout_ms": 100}),
+                json!({"command": "sleep 1000", "timeout_ms": 100}),
             ),
             is_input_complete: true,
             thought_signature: None,
@@ -5641,7 +5639,6 @@ async fn test_terminal_tool_permission_rules(cx: &mut TestAppContext) {
             tool.run(
                 ToolInput::resolved(crate::TerminalToolInput {
                     command: "rm -rf /".to_string(),
-                    cd: ".".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -5694,7 +5691,6 @@ async fn test_terminal_tool_permission_rules(cx: &mut TestAppContext) {
             tool.run(
                 ToolInput::resolved(crate::TerminalToolInput {
                     command: "echo hello".to_string(),
-                    cd: ".".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -5753,7 +5749,6 @@ async fn test_terminal_tool_permission_rules(cx: &mut TestAppContext) {
             tool.run(
                 ToolInput::resolved(crate::TerminalToolInput {
                     command: "sudo rm file".to_string(),
-                    cd: ".".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
@@ -5801,7 +5796,6 @@ async fn test_terminal_tool_permission_rules(cx: &mut TestAppContext) {
             tool.run(
                 ToolInput::resolved(crate::TerminalToolInput {
                     command: "echo hello".to_string(),
-                    cd: ".".to_string(),
                     timeout_ms: None,
                     ..Default::default()
                 }),
