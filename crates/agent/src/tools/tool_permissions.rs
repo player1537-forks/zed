@@ -34,6 +34,9 @@ pub enum ResolvedProjectPath {
         /// The canonical (real) filesystem path the symlink points to.
         canonical_target: PathBuf,
     },
+    /// The path does not belong to any project worktree. Tools should treat
+    /// it as a raw filesystem path.
+    External(PathBuf),
 }
 
 /// Asynchronously canonicalizes the absolute paths of all worktrees in a
@@ -395,9 +398,9 @@ pub fn resolve_project_path(
     cx: &App,
 ) -> Result<ResolvedProjectPath> {
     let path = path.as_ref();
-    let project_path = project
-        .find_project_path(path, cx)
-        .ok_or_else(|| anyhow!("Path {} is not in the project", path.display()))?;
+    let Some(project_path) = project.find_project_path(path, cx) else {
+        return Ok(ResolvedProjectPath::External(path.to_path_buf()));
+    };
 
     let worktree = project
         .worktree_for_id(project_path.worktree_id, cx)
@@ -577,7 +580,7 @@ pub fn detect_symlink_escape<'a>(
     cx: &App,
 ) -> Option<(&'a str, PathBuf)> {
     match resolve_project_path(project, display_path, canonical_worktree_roots, cx).ok()? {
-        ResolvedProjectPath::Safe(_) => None,
+        ResolvedProjectPath::Safe(_) | ResolvedProjectPath::External(_) => None,
         ResolvedProjectPath::SymlinkEscape {
             canonical_target, ..
         } => Some((display_path, canonical_target)),
@@ -689,7 +692,9 @@ pub fn authorize_file_edit(
 
         // Create-mode paths may not resolve yet, so also inspect the parent path
         // for symlink escapes before applying settings-based allow decisions.
-        if resolved.is_err() {
+        // Similarly, paths outside the project (External) may traverse a symlink
+        // escape in a parent directory inside the project.
+        if resolved.is_err() || matches!(&resolved, Ok(ResolvedProjectPath::External(_))) {
             if let Some(parent_path) = path_owned.parent() {
                 let parent_resolved = project_entity.read_with(cx, |project, cx| {
                     resolve_project_path(project, parent_path, &canonical_roots, cx)
@@ -776,7 +781,17 @@ pub fn authorize_file_edit(
             None => {}
         }
 
-        match resolved {
+        match &resolved {
+            Ok(ResolvedProjectPath::External(path)) => {
+                let authorize = cx.update(|cx| {
+                    let context = ToolPermissionContext::new(
+                        &tool_name,
+                        vec![path.to_string_lossy().to_string()],
+                    );
+                    event_stream.authorize(&title, context, cx)
+                });
+                authorize.await
+            }
             Ok(_) => Ok(()),
             Err(_) => {
                 let authorize = cx.update(|cx| {
@@ -1277,6 +1292,9 @@ mod tests {
                 ResolvedProjectPath::Safe(_) => {
                     panic!("symlink escaping project should be detected as SymlinkEscape");
                 }
+                ResolvedProjectPath::External(_) => {
+                    panic!("symlink escaping project should be detected as SymlinkEscape");
+                }
             }
         });
     }
@@ -1361,6 +1379,9 @@ mod tests {
                     );
                 }
                 ResolvedProjectPath::Safe(_) => {
+                    panic!("missing child under external symlink should be SymlinkEscape");
+                }
+                ResolvedProjectPath::External(_) => {
                     panic!("missing child under external symlink should be SymlinkEscape");
                 }
             }
