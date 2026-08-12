@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use util::markdown::MarkdownInlineCode;
 
@@ -81,6 +81,50 @@ impl ListDirectoryTool {
             let display = entry_path.to_string_lossy().into_owned();
             // Use a metadata call rather than `is_dir` so we can short-circuit
             // on missing entries (e.g. dangling symlinks).
+            let Ok(Some(metadata)) = fs.metadata(&entry_path).await else {
+                continue;
+            };
+            if metadata.is_dir {
+                folders.push(display);
+            } else {
+                files.push(display);
+            }
+        }
+
+        folders.sort();
+        files.sort();
+
+        let mut output = String::new();
+        if !folders.is_empty() {
+            writeln!(output, "# Folders:\n{}", folders.join("\n")).unwrap();
+        }
+        if !files.is_empty() {
+            writeln!(output, "\n# Files:\n{}", files.join("\n")).unwrap();
+        }
+        if output.is_empty() {
+            writeln!(output, "{input_path} is empty.").unwrap();
+        }
+        Ok(output)
+    }
+
+    async fn list_external_directory(
+        abs_path: &Path,
+        fs: &dyn Fs,
+        input_path: &str,
+    ) -> Result<String, String> {
+        if !fs.is_dir(abs_path).await {
+            return Err(format!("{} is not a directory.", input_path));
+        }
+
+        let mut entries = fs.read_dir(abs_path).await.map_err(|err| err.to_string())?;
+
+        let mut folders = Vec::new();
+        let mut files = Vec::new();
+        while let Some(entry) = entries.next().await {
+            let Ok(entry_path) = entry else {
+                continue;
+            };
+            let display = entry_path.to_string_lossy().into_owned();
             let Ok(Some(metadata)) = fs.metadata(&entry_path).await else {
                 continue;
             };
@@ -257,13 +301,25 @@ impl AgentTool for ListDirectoryTool {
                 project.read_with(cx, |project, cx| -> anyhow::Result<_> {
                     let resolved = resolve_project_path(project, &input.path, &canonical_roots, cx)?;
                     Ok(match resolved {
-                        ResolvedProjectPath::Safe(path) => (path, None),
+                        ResolvedProjectPath::Safe(path) => (Some(path), None),
                         ResolvedProjectPath::SymlinkEscape {
                             project_path,
                             canonical_target,
-                        } => (project_path, Some(canonical_target)),
+                        } => (Some(project_path), Some(canonical_target)),
+                        ResolvedProjectPath::External(_) => (None, None),
                     })
                 }).map_err(|e| e.to_string())?;
+
+            let Some(project_path) = project_path else {
+                let abs_path = if Path::new(&input.path).is_absolute() {
+                    PathBuf::from(&input.path)
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("Failed to get current directory: {e}"))?
+                        .join(&input.path)
+                };
+                return Self::list_external_directory(&abs_path, fs.as_ref(), &input.path).await;
+            };
 
             // Check settings exclusions synchronously
             project.read_with(cx, |project, cx| {
@@ -1220,7 +1276,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_list_outside_skills_dir_still_rejected(cx: &mut TestAppContext) {
+    async fn test_list_outside_skills_dir_now_allowed(cx: &mut TestAppContext) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1246,8 +1302,8 @@ mod tests {
             .await;
 
         assert!(
-            result.is_err(),
-            "path outside skills dir should be rejected"
+            result.is_ok(),
+            "path outside skills dir should now be listable via filesystem"
         );
     }
 }

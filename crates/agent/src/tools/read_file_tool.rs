@@ -141,6 +141,61 @@ async fn read_global_skill_file(
     Ok(result_text.into())
 }
 
+/// Read a file outside any project worktree directly via the filesystem,
+/// bypassing project/worktree resolution entirely.
+async fn read_external_file(
+    path: &str,
+    fs: &dyn fs::Fs,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    event_stream: &ToolCallEventStream,
+) -> Result<LanguageModelToolResultContent, LanguageModelToolResultContent> {
+    let path = Path::new(path);
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| tool_content_err(format!("Failed to get current directory: {e}")))?
+            .join(path)
+    };
+
+    if fs.is_dir(&abs_path).await {
+        return Err(tool_content_err(format!(
+            "{} is a directory, not a file. Use the list_directory tool to explore directory contents.",
+            abs_path.display()
+        )));
+    }
+
+    let content = fs.load(&abs_path).await.map_err(tool_content_err)?;
+
+    event_stream.update_fields(acp::ToolCallUpdateFields::new().locations(vec![
+        acp::ToolCallLocation::new(&abs_path).line(start_line.map(|line| line.saturating_sub(1))),
+    ]));
+
+    let (raw_text, first_line_number) = if start_line.is_some() || end_line.is_some() {
+        let (start, end) = resolve_line_range(start_line, end_line);
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        let start_idx = (start as usize).saturating_sub(1).min(lines.len());
+        let end_idx = (end as usize).min(lines.len()).max(start_idx);
+        (lines[start_idx..end_idx].concat(), start)
+    } else {
+        (content, 1)
+    };
+
+    let result_text = format_with_line_numbers(&raw_text, first_line_number);
+
+    let markdown = MarkdownCodeBlock {
+        tag: &abs_path.to_string_lossy(),
+        text: &result_text,
+    }
+    .to_string();
+    event_stream.update_fields(acp::ToolCallUpdateFields::new().content(vec![
+        acp::ToolCallContent::Content(acp::Content::new(markdown)),
+    ]));
+
+    Ok(result_text.into())
+}
+
 use super::tool_permissions::{
     ResolvedProjectPath, authorize_symlink_access, canonicalize_worktree_roots,
     resolve_global_skill_path, resolve_project_path,
@@ -282,13 +337,26 @@ impl AgentTool for ReadFileTool {
                     let resolved =
                         resolve_project_path(project, &input.path, &canonical_roots, cx)?;
                     anyhow::Ok(match resolved {
-                        ResolvedProjectPath::Safe(path) => (path, None),
+                        ResolvedProjectPath::Safe(path) => (Some(path), None),
                         ResolvedProjectPath::SymlinkEscape {
                             project_path,
                             canonical_target,
-                        } => (project_path, Some(canonical_target)),
+                        } => (Some(project_path), Some(canonical_target)),
+                        ResolvedProjectPath::External(_path) => (None, None),
                     })
                 }).map_err(tool_content_err)?;
+
+            let Some(project_path) = project_path else {
+                // Path is external to the project — read directly via filesystem.
+                return read_external_file(
+                    &input.path,
+                    fs.as_ref(),
+                    input.start_line,
+                    input.end_line,
+                    &event_stream,
+                )
+                .await;
+            };
 
             let abs_path = project
                 .read_with(cx, |project, cx| {
@@ -1071,7 +1139,8 @@ mod test {
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
         let tool = Arc::new(ReadFileTool::new(project, action_log, true));
 
-        // Reading a file outside the project worktree should fail
+        // Reading a file outside the project worktree should now succeed
+        // (it's read directly via the filesystem)
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -1087,8 +1156,8 @@ mod test {
             })
             .await;
         assert!(
-            result.is_err(),
-            "read_file_tool should error when attempting to read an absolute path outside a worktree"
+            result.is_ok(),
+            "read_file_tool should be able to read files outside a worktree via direct filesystem access"
         );
 
         // Reading a file within the project should succeed
@@ -2004,12 +2073,11 @@ mod test {
     }
 
     #[gpui::test]
-    async fn test_read_outside_skills_dir_still_rejected(cx: &mut TestAppContext) {
+    async fn test_read_outside_skills_dir_now_allowed(cx: &mut TestAppContext) {
         init_test(cx);
 
         // A path that's neither in the worktree nor under the global skills
-        // dir should still fail — the fast path is gated, not a backdoor for
-        // arbitrary external reads.
+        // dir is now readable via direct filesystem access.
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(path!("/root"), json!({})).await;
         fs.create_dir(path!("/etc").as_ref()).await.unwrap();
@@ -2036,8 +2104,8 @@ mod test {
             .await;
 
         assert!(
-            result.is_err(),
-            "path outside skills dir should be rejected"
+            result.is_ok(),
+            "path outside skills dir should now be readable via filesystem"
         );
     }
 }
