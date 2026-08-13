@@ -5,6 +5,7 @@ use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use shell_command_parser::{HeadTailPipe, detect_head_tail_pipe};
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
@@ -370,6 +371,25 @@ fn terminal_initial_title(input: Result<String, serde_json::Value>) -> SharedStr
     }
 }
 
+fn head_tail_pipe_error(kind: HeadTailPipe) -> String {
+    match kind {
+        HeadTailPipe::Head => {
+            "Don't pipe output to `head` in the terminal command. Use the `head_lines` \
+             parameter instead so the full output stays visible to the user while only the \
+             requested lines are returned to the model. To run this command as written, set \
+             `head_lines: 0` to skip this check."
+                .to_string()
+        }
+        HeadTailPipe::Tail => {
+            "Don't pipe output to `tail` in the terminal command. Use the `tail_lines` \
+             parameter instead so the full output stays visible to the user while only the \
+             requested lines are returned to the model. To run this command as written, set \
+             `tail_lines: 0` to skip this check."
+                .to_string()
+        }
+    }
+}
+
 /// Windows only: resolve the `(release channel, version)` of the Linux `zed` to
 /// provision inside WSL as the sandbox helper. Dev (source) builds have no
 /// matching release, so they pull the latest nightly. Nightly builds also track
@@ -410,6 +430,16 @@ async fn run_terminal_tool(
 ) -> Result<String, String> {
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
+
+    if let Some(kind) = detect_head_tail_pipe(&input.command) {
+        let overridden = match kind {
+            HeadTailPipe::Head => selection.head_lines == Some(0),
+            HeadTailPipe::Tail => selection.tail_lines == Some(0),
+        };
+        if !overridden {
+            return Err(head_tail_pipe_error(kind));
+        }
+    }
 
     let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) = cx.update(|cx| {
         let working_dir = project
@@ -1186,12 +1216,18 @@ struct TerminalOutputSelection {
 
 impl TerminalOutputSelection {
     fn is_enabled(self) -> bool {
-        self.head_lines.is_some() || self.tail_lines.is_some()
+        self.head_lines.filter(|&lines| lines > 0).is_some()
+            || self.tail_lines.filter(|&lines| lines > 0).is_some()
     }
 }
 
 fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection) -> String {
-    match (selection.head_lines, selection.tail_lines) {
+    // A line count of zero means "no filtering": it is the override signal
+    // that lets a command pipe to `head`/`tail` directly without the tool
+    // additionally trimming the (already-filtered) output.
+    let head_lines = selection.head_lines.filter(|&lines| lines > 0);
+    let tail_lines = selection.tail_lines.filter(|&lines| lines > 0);
+    match (head_lines, tail_lines) {
         (None, None) => output.to_string(),
         (Some(head_lines), None) => output
             .lines()
@@ -1545,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_terminal_output_allows_zero_lines() {
+    fn test_select_terminal_output_treats_zero_lines_as_no_filter() {
         let output = "one\ntwo\nthree";
 
         assert_eq!(
@@ -1556,7 +1592,7 @@ mod tests {
                     tail_lines: None,
                 },
             ),
-            ""
+            "one\ntwo\nthree"
         );
         assert_eq!(
             select_terminal_output_lines(
@@ -1566,7 +1602,7 @@ mod tests {
                     tail_lines: Some(0),
                 },
             ),
-            ""
+            "one\ntwo\nthree"
         );
         assert_eq!(
             select_terminal_output_lines(
@@ -1576,7 +1612,7 @@ mod tests {
                     tail_lines: Some(0),
                 },
             ),
-            "\n\n"
+            "one\ntwo\nthree"
         );
     }
 
@@ -2577,6 +2613,247 @@ mod tests {
     async fn test_rejects_nested_command_substitution(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
         assert_rejected_before_terminal_creation("echo $(cat $(whoami).txt)", cx).await;
+    }
+
+    async fn assert_head_tail_rejected_before_terminal_creation(
+        command: &str,
+        head_lines: Option<usize>,
+        tail_lines: Option<usize>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default()
+                .with_terminal(crate::tests::FakeTerminalHandle::new_never_exits(cx))
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Confirm;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: command.to_string(),
+                    timeout_ms: None,
+                    head_lines,
+                    tail_lines,
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        let result = task.await;
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("Don't pipe output to"),
+            "command {command:?} should be rejected with head/tail message, got: {error}"
+        );
+        assert!(
+            environment.terminal_creation_count() == 0,
+            "no terminal should be created for rejected command {command:?}"
+        );
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "rejected command {command:?} should not request authorization"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_head(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | head", None, None, cx).await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_head_with_n(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | head -n 5", None, None, cx)
+            .await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_head_with_dash_n(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | head -5", None, None, cx)
+            .await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_tail(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | tail", None, None, cx).await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pwd_pipe_to_tail(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("pwd | tail", None, None, cx).await;
+    }
+
+    #[gpui::test]
+    async fn test_pwd_without_pipe_is_allowed(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "pwd".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await.expect("a bare `pwd` should not be rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_tail_with_n(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | tail -n 5", None, None, cx)
+            .await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_tail_with_dash_n(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | tail -5", None, None, cx)
+            .await;
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_head_when_override_is_for_tail(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cat foo | head", None, Some(0), cx)
+            .await;
+    }
+
+    #[gpui::test]
+    async fn test_allows_pipe_to_head_with_head_lines_zero_override(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | head -n 5".to_string(),
+                    timeout_ms: None,
+                    head_lines: Some(0),
+                    tail_lines: None,
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("head pipe with head_lines: 0 override should proceed");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_allows_pipe_to_tail_with_tail_lines_zero_override(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | tail -n 5".to_string(),
+                    timeout_ms: None,
+                    head_lines: None,
+                    tail_lines: Some(0),
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("tail pipe with tail_lines: 0 override should proceed");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
