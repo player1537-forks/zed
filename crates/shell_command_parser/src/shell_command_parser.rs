@@ -117,6 +117,71 @@ pub fn validate_terminal_command(command: &str) -> TerminalCommandValidation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadTailPipe {
+    Head,
+    Tail,
+}
+
+/// Detects a simple pipeline that pipes into `head` or `tail` (e.g. `cat foo |
+/// head`, `cmd | tail -n 5`, `cmd | head -5`). Only top-level pipelines are
+/// considered, so `head`/`tail` inside a subshell or substitution is ignored.
+pub fn detect_head_tail_pipe(command: &str) -> Option<HeadTailPipe> {
+    let reader = BufReader::new(command.as_bytes());
+    let options = ParserOptions::default();
+    let source_info = SourceInfo::default();
+    let mut parser = Parser::new(reader, &options, &source_info);
+
+    let program = parser.parse_program().ok()?;
+
+    for compound_list in &program.complete_commands {
+        for item in &compound_list.0 {
+            if let Some(kind) = detect_in_and_or_list(&item.0) {
+                return Some(kind);
+            }
+        }
+    }
+
+    None
+}
+
+fn detect_in_and_or_list(and_or_list: &ast::AndOrList) -> Option<HeadTailPipe> {
+    if let Some(kind) = detect_in_pipeline(&and_or_list.first) {
+        return Some(kind);
+    }
+    for and_or in &and_or_list.additional {
+        let pipeline = match and_or {
+            ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
+        };
+        if let Some(kind) = detect_in_pipeline(pipeline) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+fn detect_in_pipeline(pipeline: &ast::Pipeline) -> Option<HeadTailPipe> {
+    // Only commands after the first are pipe recipients.
+    for command in pipeline.seq.iter().skip(1) {
+        if let Some(kind) = detect_in_command(command) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+fn detect_in_command(command: &ast::Command) -> Option<HeadTailPipe> {
+    let ast::Command::Simple(simple_command) = command else {
+        return None;
+    };
+    let word = simple_command.word_or_name.as_ref()?;
+    match normalize_word(word)?.as_str() {
+        "head" => Some(HeadTailPipe::Head),
+        "tail" => Some(HeadTailPipe::Tail),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalProgramValidation {
     Safe,
     Unsafe,
@@ -1215,6 +1280,85 @@ mod tests {
     fn test_pipe() {
         let commands = extract_commands("ls | xargs rm -rf").expect("parse failed");
         assert_eq!(commands, vec!["ls", "xargs rm -rf"]);
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_variants() {
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | head"),
+            Some(HeadTailPipe::Head)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | head -n 5"),
+            Some(HeadTailPipe::Head)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | head -5"),
+            Some(HeadTailPipe::Head)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | tail"),
+            Some(HeadTailPipe::Tail)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | tail -n 5"),
+            Some(HeadTailPipe::Tail)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | tail -5"),
+            Some(HeadTailPipe::Tail)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("pwd | tail"),
+            Some(HeadTailPipe::Tail)
+        );
+        assert_eq!(detect_head_tail_pipe("pwd"), None);
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_matches_second_pipe_segment() {
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | grep bar | head"),
+            Some(HeadTailPipe::Head)
+        );
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_ignores_first_command() {
+        assert_eq!(detect_head_tail_pipe("head -5 foo"), None);
+        assert_eq!(detect_head_tail_pipe("tail -n 5 foo"), None);
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_ignores_quoted_literal() {
+        assert_eq!(detect_head_tail_pipe("echo 'a | head'"), None);
+        assert_eq!(detect_head_tail_pipe("echo \"a | tail -n 5\""), None);
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_ignores_other_pipes() {
+        assert_eq!(detect_head_tail_pipe("cat foo | grep bar"), None);
+        assert_eq!(detect_head_tail_pipe("cat foo | wc -l"), None);
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_handles_chained_and_or_lists() {
+        assert_eq!(
+            detect_head_tail_pipe("cat foo && cat bar | tail"),
+            Some(HeadTailPipe::Tail)
+        );
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | head && cat bar"),
+            Some(HeadTailPipe::Head)
+        );
+    }
+
+    #[test]
+    fn test_detect_head_tail_pipe_normalizes_quoted_command_name() {
+        assert_eq!(
+            detect_head_tail_pipe("cat foo | 'tail' -n 5"),
+            Some(HeadTailPipe::Tail)
+        );
     }
 
     #[test]
