@@ -895,27 +895,12 @@ impl MultiWorkspace {
         }
     }
 
-    pub fn move_project_group_up(&mut self, key: &ProjectGroupKey, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self
-            .project_groups
-            .iter()
-            .position(|group| group.key == *key)
-        else {
-            return false;
-        };
-        if index == 0 {
-            return false;
-        }
-        self.project_groups.swap(index - 1, index);
-        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
-        self.serialize(cx);
-        cx.notify();
-        true
-    }
-
-    pub fn move_project_group_down(
+    /// Moves a project group by `offset` positions. Positive values move it down
+    /// (later in the list); negative values move it up.
+    pub fn move_project_group(
         &mut self,
         key: &ProjectGroupKey,
+        offset: isize,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(index) = self
@@ -925,14 +910,32 @@ impl MultiWorkspace {
         else {
             return false;
         };
-        if index + 1 >= self.project_groups.len() {
+
+        let target_index = index as isize + offset;
+        if target_index < 0 || target_index as usize >= self.project_groups.len() {
             return false;
         }
-        self.project_groups.swap(index, index + 1);
+
+        let target_index = target_index as usize;
+        let group = self.project_groups.remove(index);
+        self.project_groups.insert(target_index, group);
+
         cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
         self.serialize(cx);
         cx.notify();
         true
+    }
+
+    pub fn move_project_group_up(&mut self, key: &ProjectGroupKey, cx: &mut Context<Self>) -> bool {
+        self.move_project_group(key, -1, cx)
+    }
+
+    pub fn move_project_group_down(
+        &mut self,
+        key: &ProjectGroupKey,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.move_project_group(key, 1, cx)
     }
 
     pub fn workspaces_for_project_group(
