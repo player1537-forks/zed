@@ -272,6 +272,79 @@ async fn test_move_active_project_group_actions(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_move_project_group(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_c", json!({ "file.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/root_c".as_ref()], cx).await;
+
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_c = project_c.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    multi_workspace.update(cx, |mw, cx| mw.open_sidebar(cx));
+    cx.run_until_parked();
+
+    multi_workspace.update(cx, |mw, _cx| {
+        mw.test_add_project_group(ProjectGroup {
+            key: key_b.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+        mw.test_add_project_group(ProjectGroup {
+            key: key_c.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+    });
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_group_keys(),
+            vec![key_a.clone(), key_b.clone(), key_c.clone()]
+        );
+    });
+
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(mw.move_project_group(&key_a, 2, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_group_keys(),
+            vec![key_b.clone(), key_c.clone(), key_a.clone()]
+        );
+    });
+
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(mw.move_project_group(&key_a, -1, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_group_keys(),
+            vec![key_b.clone(), key_a.clone(), key_c.clone()]
+        );
+    });
+
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(!mw.move_project_group(&key_b, -1, cx));
+        assert!(!mw.move_project_group(&key_c, 1, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_group_keys(),
+            vec![key_b.clone(), key_a.clone(), key_c.clone()]
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_open_new_window_does_not_open_sidebar_on_existing_window(cx: &mut TestAppContext) {
     init_test(cx);
 

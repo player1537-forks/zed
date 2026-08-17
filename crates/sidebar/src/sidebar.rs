@@ -54,16 +54,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, Divider, GradientFade,
-    HighlightedLabel, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes,
-    Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar,
-    prelude::*, render_modifiers, right_click_menu,
+    AgentThreadStatus, CommonAnimationExt, ContextMenu, Divider, GradientFade, HighlightedLabel,
+    KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes, Scrollbars, Tab,
+    ThreadItem, ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar, prelude::*,
+    render_modifiers, right_click_menu,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
-    CloseWindow, FocusWorkspaceSidebar, MoveProjectDown, MoveProjectUp, MultiWorkspace,
+    CloseWindow, FocusWorkspaceSidebar, MultiWorkspace,
     MultiWorkspaceEvent, NextProject, NextThread, Open, OpenMode, PreviousProject, PreviousThread,
     ProjectGroupKey, RemovalIntent, SaveIntent, Sidebar as WorkspaceSidebar, SidebarSide, Toast,
     ToggleWorkspaceSidebar, Workspace, notifications::NotificationId, sidebar_side_context_menu,
@@ -2837,8 +2837,10 @@ impl Sidebar {
                     })
                     .unwrap_or((None, 0));
                 let show_reorder_entries = total_groups >= 2;
-                let can_move_up = group_index.is_some_and(|i| i > 0);
-                let can_move_down = group_index.is_some_and(|i| i + 1 < total_groups);
+                let max_move_up = group_index.unwrap_or(0);
+                let max_move_down = group_index
+                    .map(|index| total_groups.saturating_sub(1).saturating_sub(index))
+                    .unwrap_or(0);
 
                 let active_workspace = multi_workspace
                     .read_with(cx, |multi_workspace, _cx| {
@@ -3071,36 +3073,150 @@ impl Sidebar {
                             let move_down_weak_menu = weak_menu.clone();
 
                             this.separator()
-                                .item(
-                                    ContextMenuEntry::new("Move Up")
-                                        .action(Box::new(MoveProjectUp))
-                                        .disabled(!can_move_up)
-                                        .handler(move |_window, cx| {
-                                            move_up_multi_workspace
-                                                .update(cx, |mw, cx| {
-                                                    mw.move_project_group_up(&move_up_key, cx);
+                                .custom_entry(
+                                    {
+                                        let multi_workspace = move_up_multi_workspace.clone();
+                                        let key = move_up_key.clone();
+                                        let weak_menu = move_up_weak_menu.clone();
+                                        move |_window, _cx| {
+                                            let buttons = (2..total_groups).map(|distance| {
+                                                let multi_workspace = multi_workspace.clone();
+                                                let key = key.clone();
+                                                let weak_menu = weak_menu.clone();
+                                                Button::new(
+                                                    ("move-up", distance),
+                                                    distance.to_string(),
+                                                )
+                                                .label_size(LabelSize::Small)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(distance > max_move_up)
+                                                .on_click(move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    window.prevent_default();
+                                                    multi_workspace
+                                                        .update(cx, |mw, cx| {
+                                                            mw.move_project_group(
+                                                                &key,
+                                                                -(distance as isize),
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                    weak_menu
+                                                        .update(cx, |_, cx| cx.emit(DismissEvent))
+                                                        .ok();
                                                 })
-                                                .ok();
-                                            move_up_weak_menu
-                                                .update(cx, |_, cx| cx.emit(DismissEvent))
-                                                .ok();
-                                        }),
+                                            });
+
+                                            h_flex()
+                                                .w_full()
+                                                .justify_between()
+                                                .child(
+                                                    Label::new("Move Up")
+                                                        .when(max_move_up == 0, |label| {
+                                                            label.color(Color::Disabled)
+                                                        }),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .id("move-up-buttons")
+                                                        .gap_1()
+                                                        .children(buttons)
+                                                        .on_click(|_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            window.prevent_default();
+                                                        }),
+                                                )
+                                                .into_any_element()
+                                        }
+                                    },
+                                    move |_window, cx| {
+                                        if max_move_up == 0 {
+                                            return;
+                                        }
+                                        move_up_multi_workspace
+                                            .update(cx, |mw, cx| {
+                                                mw.move_project_group(&move_up_key, -1, cx);
+                                            })
+                                            .ok();
+                                        move_up_weak_menu
+                                            .update(cx, |_, cx| cx.emit(DismissEvent))
+                                            .ok();
+                                    },
                                 )
-                                .item(
-                                    ContextMenuEntry::new("Move Down")
-                                        .action(Box::new(MoveProjectDown))
-                                        .disabled(!can_move_down)
-                                        .handler(move |_window, cx| {
-                                            move_down_multi_workspace
-                                                .update(cx, |mw, cx| {
-                                                    mw.move_project_group_down(&move_down_key, cx);
+                                .selectable(max_move_up > 0)
+                                .custom_entry(
+                                    {
+                                        let multi_workspace = move_down_multi_workspace.clone();
+                                        let key = move_down_key.clone();
+                                        let weak_menu = move_down_weak_menu.clone();
+                                        move |_window, _cx| {
+                                            let buttons = (2..total_groups).map(|distance| {
+                                                let multi_workspace = multi_workspace.clone();
+                                                let key = key.clone();
+                                                let weak_menu = weak_menu.clone();
+                                                Button::new(
+                                                    ("move-down", distance),
+                                                    distance.to_string(),
+                                                )
+                                                .label_size(LabelSize::Small)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(distance > max_move_down)
+                                                .on_click(move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    window.prevent_default();
+                                                    multi_workspace
+                                                        .update(cx, |mw, cx| {
+                                                            mw.move_project_group(
+                                                                &key,
+                                                                distance as isize,
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                    weak_menu
+                                                        .update(cx, |_, cx| cx.emit(DismissEvent))
+                                                        .ok();
                                                 })
-                                                .ok();
-                                            move_down_weak_menu
-                                                .update(cx, |_, cx| cx.emit(DismissEvent))
-                                                .ok();
-                                        }),
+                                            });
+
+                                            h_flex()
+                                                .w_full()
+                                                .justify_between()
+                                                .child(
+                                                    Label::new("Move Down")
+                                                        .when(max_move_down == 0, |label| {
+                                                            label.color(Color::Disabled)
+                                                        }),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .id("move-down-buttons")
+                                                        .gap_1()
+                                                        .children(buttons)
+                                                        .on_click(|_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            window.prevent_default();
+                                                        }),
+                                                )
+                                                .into_any_element()
+                                        }
+                                    },
+                                    move |_window, cx| {
+                                        if max_move_down == 0 {
+                                            return;
+                                        }
+                                        move_down_multi_workspace
+                                            .update(cx, |mw, cx| {
+                                                mw.move_project_group(&move_down_key, 1, cx);
+                                            })
+                                            .ok();
+                                        move_down_weak_menu
+                                            .update(cx, |_, cx| cx.emit(DismissEvent))
+                                            .ok();
+                                    },
                                 )
+                                .selectable(max_move_down > 0)
                         });
 
                         let project_group_key = project_group_key.clone();
