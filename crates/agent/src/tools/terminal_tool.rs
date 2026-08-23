@@ -5,7 +5,7 @@ use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use shell_command_parser::{HeadTailPipe, detect_head_tail_pipe};
+use shell_command_parser::{HeadTailPipe, detect_head_tail_pipe, replace_head_tail_pipe};
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
@@ -424,22 +424,37 @@ fn wsl_zed_release(_cx: &App) -> Option<(String, String)> {
 async fn run_terminal_tool(
     project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
-    input: TerminalToolRequest,
+    mut input: TerminalToolRequest,
     event_stream: ToolCallEventStream,
     cx: &mut AsyncApp,
 ) -> Result<String, String> {
-    let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
     if let Some(kind) = detect_head_tail_pipe(&input.command) {
         let overridden = match kind {
-            HeadTailPipe::Head => selection.head_lines == Some(0),
-            HeadTailPipe::Tail => selection.tail_lines == Some(0),
+            HeadTailPipe::Head => input.selection.head_lines == Some(0),
+            HeadTailPipe::Tail => input.selection.tail_lines == Some(0),
         };
         if !overridden {
-            return Err(head_tail_pipe_error(kind));
+            if let Some(replacement) = replace_head_tail_pipe(&input.command) {
+                input.command = replacement.new_command;
+                input.selection = TerminalOutputSelection {
+                    head_lines: match replacement.kind {
+                        HeadTailPipe::Head => Some(replacement.count),
+                        HeadTailPipe::Tail => None,
+                    },
+                    tail_lines: match replacement.kind {
+                        HeadTailPipe::Tail => Some(replacement.count),
+                        HeadTailPipe::Head => None,
+                    },
+                };
+            } else {
+                return Err(head_tail_pipe_error(kind));
+            }
         }
     }
+
+    let selection = input.selection;
 
     let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) = cx.update(|cx| {
         let working_dir = project
@@ -2674,35 +2689,214 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_head(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_head(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | head", None, None, cx).await;
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | head".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to head should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_head_with_n(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_head_with_n(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | head -n 5", None, None, cx)
-            .await;
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | head -n 5".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to head should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_head_with_dash_n(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_head_with_dash_n(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | head -5", None, None, cx)
-            .await;
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | head -5".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to head should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_tail(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_tail(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | tail", None, None, cx).await;
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | tail".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to tail should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_rejects_pwd_pipe_to_tail(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pwd_pipe_to_tail(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("pwd | tail", None, None, cx).await;
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "pwd | tail".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to tail should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
@@ -2748,23 +2942,143 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_tail_with_n(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_tail_with_n(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | tail -n 5", None, None, cx)
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | tail -n 5".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to tail should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_auto_replaces_pipe_to_tail_with_dash_n(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | tail -5".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to tail should be auto-replaced, not rejected");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_auto_replaces_pipe_to_head_when_override_is_for_tail(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "cat foo | head".to_string(),
+                    timeout_ms: None,
+                    head_lines: None,
+                    tail_lines: Some(0),
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await
+            .expect("pipe to head should be auto-replaced even when override is for tail");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_rejects_pipe_to_head_when_in_middle_of_semicolon(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        assert_head_tail_rejected_before_terminal_creation("cmd1 | head -5; cmd2", None, None, cx)
             .await;
     }
 
     #[gpui::test]
-    async fn test_rejects_pipe_to_tail_with_dash_n(cx: &mut gpui::TestAppContext) {
+    async fn test_rejects_pipe_to_head_when_followed_by_and_or(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | tail -5", None, None, cx)
-            .await;
-    }
-
-    #[gpui::test]
-    async fn test_rejects_pipe_to_head_when_override_is_for_tail(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | head", None, Some(0), cx)
+        assert_head_tail_rejected_before_terminal_creation("cat foo | head && echo done", None, None, cx)
             .await;
     }
 

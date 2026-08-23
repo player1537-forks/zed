@@ -4,6 +4,8 @@ use brush_parser::word::WordPiece;
 use brush_parser::{Parser, ParserOptions, SourceInfo};
 use std::io::BufReader;
 
+const HEAD_TAIL_DEFAULT_COUNT: usize = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalCommandPrefix {
     pub normalized: String,
@@ -142,6 +144,225 @@ pub fn detect_head_tail_pipe(command: &str) -> Option<HeadTailPipe> {
     }
 
     None
+}
+
+/// The result of auto-replacing a head/tail command with `cat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeadTailPipeReplacement {
+    pub new_command: String,
+    pub kind: HeadTailPipe,
+    pub count: usize,
+}
+
+/// Detects a `head`/`tail` command that is the last output producer and
+/// replaces it with `cat`, returning the modified command and the appropriate
+/// line count to use with `head_lines`/`tail_lines`.
+///
+/// Handles two cases:
+/// - **Pipeline case**: `head`/`tail` is the last command in a `|`-pipeline
+///   (e.g. `cat foo | head -5`).
+/// - **Sequence case**: `head`/`tail` is the last command in a `;`-separated
+///   sequence (e.g. `cmd; head -5 file.txt`).
+///
+/// When neither condition is met, returns `None` so the caller can fall back
+/// to rejecting the command.
+pub fn replace_head_tail_pipe(command: &str) -> Option<HeadTailPipeReplacement> {
+    let reader = BufReader::new(command.as_bytes());
+    let options = ParserOptions::default();
+    let source_info = SourceInfo::default();
+    let mut parser = Parser::new(reader, &options, &source_info);
+
+    let program = parser.parse_program().ok()?;
+
+    // Walk complete commands (; sequences) from the end backwards.
+    for compound_list in &program.complete_commands {
+        for (item_idx, item) in compound_list.0.iter().enumerate() {
+            let is_last_item = item_idx == compound_list.0.len().saturating_sub(1);
+            if let Some(result) = replace_in_and_or_list(command, &item.0, is_last_item) {
+                return Some(result);
+            }
+        }
+    }
+
+    None
+}
+
+fn replace_in_and_or_list(
+    command: &str,
+    and_or_list: &ast::AndOrList,
+    is_last_item: bool,
+) -> Option<HeadTailPipeReplacement> {
+    // The first pipeline is the last producer only if:
+    // - It's the last item in the ; sequence, AND
+    // - There are no additional &&/|| pipelines after it
+    if is_last_item && and_or_list.additional.is_empty() {
+        if let Some(result) = replace_in_pipeline(command, &and_or_list.first) {
+            return Some(result);
+        }
+    }
+
+    // Check &&/|| additional pipelines.
+    for (add_idx, and_or) in and_or_list.additional.iter().enumerate() {
+        let pipeline = match and_or {
+            ast::AndOr::And(p) | ast::AndOr::Or(p) => p,
+        };
+        // The additional pipeline is the last producer only if:
+        // - It's the last item in the ; sequence, AND
+        // - It's the last additional pipeline
+        if is_last_item && add_idx == and_or_list.additional.len().saturating_sub(1) {
+            if let Some(result) = replace_in_pipeline(command, pipeline) {
+                return Some(result);
+            }
+        }
+    }
+
+    None
+}
+
+fn replace_in_pipeline(
+    command: &str,
+    pipeline: &ast::Pipeline,
+) -> Option<HeadTailPipeReplacement> {
+    // Check pipe recipients (commands after the first), starting from the end.
+    // Only the LAST pipe recipient counts as the final output producer.
+    for (cmd_idx, cmd) in pipeline.seq.iter().enumerate().rev() {
+        if cmd_idx == 0 {
+            continue;
+        }
+
+        let Some(kind) = detect_in_command(cmd) else {
+            continue;
+        };
+
+        // Only auto-replace when head/tail is the last in the pipeline.
+        if cmd_idx != pipeline.seq.len().saturating_sub(1) {
+            return None;
+        }
+
+        let ast::Command::Simple(simple_command) = cmd else {
+            return None;
+        };
+
+        return build_replacement(command, simple_command, kind);
+    }
+
+    None
+}
+
+fn build_replacement(
+    command: &str,
+    simple_command: &ast::SimpleCommand,
+    kind: HeadTailPipe,
+) -> Option<HeadTailPipeReplacement> {
+    let cmd_word = simple_command.word_or_name.as_ref()?;
+    let cmd_loc = cmd_word.location()?;
+    let cmd_start = cmd_loc.start.index;
+
+    // Find the end position: the end of the last suffix Word item.
+    let cmd_end = simple_command
+        .suffix
+        .as_ref()
+        .and_then(|suffix| {
+            suffix
+                .0
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    ast::CommandPrefixOrSuffixItem::Word(w) => {
+                        w.location().map(|l| l.end.index)
+                    }
+                    _ => None,
+                })
+                .or_else(|| Some(cmd_loc.end.index))
+        })
+        .unwrap_or(cmd_loc.end.index);
+
+    // Extract the line count from the suffix arguments.
+    let (count, kept_word_spans) =
+        extract_count_and_kept_spans(simple_command.suffix.as_ref())?;
+
+    // Build the replacement string: "cat" + kept suffix words.
+    let mut replacement = "cat".to_string();
+    for (start, end) in &kept_word_spans {
+        replacement.push(' ');
+        replacement.push_str(&command[*start..*end]);
+    }
+
+    let new_command = format!("{}{}{}", &command[..cmd_start], replacement, &command[cmd_end..]);
+
+    Some(HeadTailPipeReplacement {
+        new_command,
+        kind,
+        count,
+    })
+}
+
+/// Extracts the line count from a head/tail command's suffix, and returns the
+/// spans of suffix words that are NOT line-count flags (to be kept in the
+/// replacement).
+fn extract_count_and_kept_spans(
+    suffix: Option<&ast::CommandSuffix>,
+) -> Option<(usize, Vec<(usize, usize)>)> {
+    let Some(suffix) = suffix else {
+        // No suffix: default count of 10.
+        return Some((HEAD_TAIL_DEFAULT_COUNT, Vec::new()));
+    };
+
+    let items = &suffix.0;
+    let mut i = 0;
+    let mut count = None;
+    let mut kept_spans: Vec<(usize, usize)> = Vec::new();
+
+    while i < items.len() {
+        match &items[i] {
+            ast::CommandPrefixOrSuffixItem::Word(word) => {
+                let norm = normalize_word(word)?;
+
+                // Check -N format (e.g., -5, -20).
+                if let Some(rest) = norm.strip_prefix('-') {
+                    if let Ok(n) = rest.parse::<usize>() {
+                        count = Some(n);
+                        i += 1;
+                        continue;
+                    }
+                    // Check -nN format (e.g., -n5, -n20).
+                    if let Some(rest) = rest.strip_prefix('n') {
+                        if let Ok(n) = rest.parse::<usize>() {
+                            count = Some(n);
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                // Check -n <number> pattern (two tokens).
+                if norm == "-n" && i + 1 < items.len() {
+                    if let ast::CommandPrefixOrSuffixItem::Word(next_word) = &items[i + 1] {
+                        if let Some(next_norm) = normalize_word(next_word) {
+                            if let Ok(n) = next_norm.parse::<usize>() {
+                                count = Some(n);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Not a count flag: keep it.
+                if let Some(loc) = word.location() {
+                    kept_spans.push((loc.start.index, loc.end.index));
+                }
+                i += 1;
+            }
+            // Non-word suffix items (redirects, assignments) are outside the
+            // replacement span, so we just skip them.
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    count.map(|c| (c, kept_spans))
 }
 
 fn detect_in_and_or_list(and_or_list: &ast::AndOrList) -> Option<HeadTailPipe> {
@@ -1359,6 +1580,126 @@ mod tests {
             detect_head_tail_pipe("cat foo | 'tail' -n 5"),
             Some(HeadTailPipe::Tail)
         );
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_head() {
+        let result = replace_head_tail_pipe("cat foo | head").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Head);
+        assert_eq!(result.count, 10);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_head_with_n() {
+        let result = replace_head_tail_pipe("cat foo | head -n 5").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Head);
+        assert_eq!(result.count, 5);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_head_with_dash_n() {
+        let result = replace_head_tail_pipe("cat foo | head -5").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Head);
+        assert_eq!(result.count, 5);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_tail() {
+        let result = replace_head_tail_pipe("cat foo | tail").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Tail);
+        assert_eq!(result.count, 10);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_tail_with_n() {
+        let result = replace_head_tail_pipe("cat foo | tail -n 5").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Tail);
+        assert_eq!(result.count, 5);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_replaces_last_tail_with_dash_n() {
+        let result = replace_head_tail_pipe("cat foo | tail -5").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.kind, HeadTailPipe::Tail);
+        assert_eq!(result.count, 5);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_second_pipe_segment() {
+        let result = replace_head_tail_pipe("cat foo | grep bar | head").unwrap();
+        assert_eq!(result.new_command, "cat foo | grep bar | cat");
+        assert_eq!(result.kind, HeadTailPipe::Head);
+        assert_eq!(result.count, 10);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_handles_semicolon_sequence_not_piped() {
+        // standalone head/tail in a ; sequence is NOT replaced (only | head is).
+        assert_eq!(replace_head_tail_pipe("some_command; head -5 file.txt"), None);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_ignores_standalone_head_with_file_arg() {
+        assert_eq!(replace_head_tail_pipe("cmd && head -3 /var/log/syslog"), None);
+        assert_eq!(replace_head_tail_pipe("head -5 foo"), None);
+        assert_eq!(replace_head_tail_pipe("head -10 /var/log/system.log"), None);
+        assert_eq!(replace_head_tail_pipe("tail -5 file1.txt file2.txt"), None);
+        assert_eq!(replace_head_tail_pipe("head -5 file.txt > output.txt"), None);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_middle_pipeline_returns_none() {
+        // Head in the middle of a pipeline is not the last producer.
+        assert_eq!(replace_head_tail_pipe("cmd | head -5 | grep foo"), None);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_not_last_in_and_or() {
+        // Head is the last pipe recipient, but it's not the last in the AndOrList.
+        assert_eq!(
+            replace_head_tail_pipe("cat foo | head && echo done"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_not_last_in_semicolon() {
+        // Head is not the last command in the ; sequence.
+        assert_eq!(
+            replace_head_tail_pipe("cmd1 | head -5; cmd2"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_ignores_other_commands() {
+        assert_eq!(replace_head_tail_pipe("cat foo | grep bar"), None);
+        assert_eq!(replace_head_tail_pipe("cat foo | wc -l"), None);
+        assert_eq!(replace_head_tail_pipe("echo hello"), None);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_respects_head_lines_zero_override() {
+        // The parser doesn't check overrides; it just returns the replacement.
+        // The override check is in terminal_tool.rs.
+        let result = replace_head_tail_pipe("cat foo | head").unwrap();
+        assert_eq!(result.new_command, "cat foo | cat");
+        assert_eq!(result.count, 10);
+    }
+
+    #[test]
+    fn test_replace_head_tail_pipe_chained_pipe_and_semicolon() {
+        // tail is used as a pipe recipient, so it should be replaced.
+        let result = replace_head_tail_pipe("cmd1; cmd2 | tail -20").unwrap();
+        assert_eq!(result.new_command, "cmd1; cmd2 | cat");
+        assert_eq!(result.kind, HeadTailPipe::Tail);
+        assert_eq!(result.count, 20);
     }
 
     #[test]
