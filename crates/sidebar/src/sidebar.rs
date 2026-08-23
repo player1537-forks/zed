@@ -2444,9 +2444,11 @@ impl Sidebar {
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if event.modifiers().secondary() {
+                        if !this.has_filter_query(cx) {
+                            this.toggle_collapse(&key_for_toggle, window, cx);
+                        }
+                    } else {
                         this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
-                    } else if !this.has_filter_query(cx) {
-                        this.toggle_collapse(&key_for_toggle, window, cx);
                     }
                 }),
             )

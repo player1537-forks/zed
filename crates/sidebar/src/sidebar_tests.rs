@@ -14833,10 +14833,10 @@ async fn test_collab_guest_move_thread_paths_is_noop(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_cmd_click_project_header_returns_to_last_active_linked_worktree_workspace(
+async fn test_click_project_header_returns_to_last_active_linked_worktree_workspace(
     cx: &mut TestAppContext,
 ) {
-    // Regression test for: cmd-clicking a project group header should return
+    // Regression test for: clicking a project group header should return
     // the user to the workspace they most recently had active in that group,
     // including workspaces rooted at a linked worktree.
     init_test(cx);
@@ -14933,7 +14933,7 @@ async fn test_cmd_click_project_header_returns_to_last_active_linked_worktree_wo
         "group B's workspace should be active after step 2"
     );
 
-    // Step 3: simulate cmd-click on group A's header. The project group key
+    // Step 3: simulate a click on group A's header. The project group key
     // for group A is derived from the *main-paths* workspace (linked-worktree
     // workspaces share the same key because it normalizes to main-worktree
     // paths).
@@ -14945,15 +14945,15 @@ async fn test_cmd_click_project_header_returns_to_last_active_linked_worktree_wo
 
     // Expected: we're back in the linked-worktree workspace, not the
     // main-paths one.
-    let active_after_cmd_click = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let active_after_click = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
     assert_eq!(
-        active_after_cmd_click, worktree_workspace_a,
-        "cmd-click on group A's header should return to the last-active \
+        active_after_click, worktree_workspace_a,
+        "click on group A's header should return to the last-active \
          linked-worktree workspace, not the main-paths workspace"
     );
     assert_ne!(
-        active_after_cmd_click, main_workspace_a,
-        "cmd-click must not fall back to the main-paths workspace when a \
+        active_after_click, main_workspace_a,
+        "click must not fall back to the main-paths workspace when a \
          linked-worktree workspace was the last-active one for the group"
     );
 }
