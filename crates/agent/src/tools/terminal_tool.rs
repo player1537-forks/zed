@@ -5,7 +5,7 @@ use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use shell_command_parser::{HeadTailPipe, detect_head_tail_pipe, replace_head_tail_pipe};
+use shell_command_parser::replace_tail_pipe;
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
@@ -31,7 +31,7 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values yourself before calling this tool, or ask the user for the literal value to use.
 ///
-/// Do not pipe output to `head`, `tail`, or similar output-filtering commands just to reduce what you receive. Instead, use `head_lines` and/or `tail_lines`; this keeps the terminal output visible to the user in real time while limiting only the final output sent back to you. When both are specified, the first `head_lines` lines are returned, then a blank line, then the last `tail_lines` lines. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
+/// Do not pipe output to `tail` or similar output-filtering commands just to reduce what you receive. If you pipe output to `tail`, it will be automatically replaced with `cat` so the full output remains available. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
 ///
 /// Do not use this tool for commands that run indefinitely, such as servers (like `npm run start`, `npm run dev`, `python -m http.server`, etc) or file watchers that don't terminate on their own.
 ///
@@ -53,12 +53,6 @@ pub struct TerminalToolInput {
     pub command: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
-    /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
-    #[serde(default)]
-    pub head_lines: Option<usize>,
-    /// Return only the last N lines of terminal output to the model after the command finishes. Do not pipe output to `tail`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
-    #[serde(default)]
-    pub tail_lines: Option<usize>,
 }
 
 /// Executes a shell one-liner and returns the combined output.
@@ -69,7 +63,7 @@ pub struct TerminalToolInput {
 ///
 /// Do not generate terminal commands that use shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`. Resolve those values first or ask the user for the literal value to use.
 ///
-/// Do not pipe output to `head`, `tail`, or similar output-filtering commands just to reduce what you receive. Instead, use `head_lines` and/or `tail_lines`; this keeps the terminal output visible to the user in real time while limiting only the final output sent back to you. When both are specified, the first `head_lines` lines are returned, then a blank line, then the last `tail_lines` lines. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
+/// Do not pipe output to `tail` or similar output-filtering commands just to reduce what you receive. If you pipe output to `tail`, it will be automatically replaced with `cat` so the full output remains available. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
 ///
 /// Do not use this tool for commands that run indefinitely, such as servers (like `npm run start`, `npm run dev`, `python -m http.server`, etc) or file watchers that don't terminate on their own.
 ///
@@ -91,12 +85,6 @@ pub struct SandboxedTerminalToolInput {
     pub command: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
-    /// Return only the first N lines of terminal output to the model after the command finishes. Do not pipe output to `head`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
-    #[serde(default)]
-    pub head_lines: Option<usize>,
-    /// Return only the last N lines of terminal output to the model after the command finishes. Do not pipe output to `tail`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
-    #[serde(default)]
-    pub tail_lines: Option<usize>,
     /// Hosts the command needs outbound network access to.
     ///
     /// Sandboxed commands cannot reach the network by default. List the hosts
@@ -212,7 +200,6 @@ struct TerminalSandboxInput {
 struct TerminalToolRequest {
     command: String,
     timeout_ms: Option<u64>,
-    selection: TerminalOutputSelection,
     sandbox: Option<TerminalSandboxInput>,
 }
 
@@ -221,10 +208,6 @@ impl From<TerminalToolInput> for TerminalToolRequest {
         Self {
             command: input.command,
             timeout_ms: input.timeout_ms,
-            selection: TerminalOutputSelection {
-                head_lines: input.head_lines,
-                tail_lines: input.tail_lines,
-            },
             sandbox: None,
         }
     }
@@ -235,10 +218,6 @@ impl From<SandboxedTerminalToolInput> for TerminalToolRequest {
         Self {
             command: input.command,
             timeout_ms: input.timeout_ms,
-            selection: TerminalOutputSelection {
-                head_lines: input.head_lines,
-                tail_lines: input.tail_lines,
-            },
             sandbox: Some(TerminalSandboxInput {
                 allow_hosts: input.allow_hosts,
                 allow_all_hosts: input.allow_all_hosts,
@@ -371,25 +350,6 @@ fn terminal_initial_title(input: Result<String, serde_json::Value>) -> SharedStr
     }
 }
 
-fn head_tail_pipe_error(kind: HeadTailPipe) -> String {
-    match kind {
-        HeadTailPipe::Head => {
-            "Don't pipe output to `head` in the terminal command. Use the `head_lines` \
-             parameter instead so the full output stays visible to the user while only the \
-             requested lines are returned to the model. To run this command as written, set \
-             `head_lines: 0` to skip this check."
-                .to_string()
-        }
-        HeadTailPipe::Tail => {
-            "Don't pipe output to `tail` in the terminal command. Use the `tail_lines` \
-             parameter instead so the full output stays visible to the user while only the \
-             requested lines are returned to the model. To run this command as written, set \
-             `tail_lines: 0` to skip this check."
-                .to_string()
-        }
-    }
-}
-
 /// Windows only: resolve the `(release channel, version)` of the Linux `zed` to
 /// provision inside WSL as the sandbox helper. Dev (source) builds have no
 /// matching release, so they pull the latest nightly. Nightly builds also track
@@ -424,37 +384,16 @@ fn wsl_zed_release(_cx: &App) -> Option<(String, String)> {
 async fn run_terminal_tool(
     project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
-    mut input: TerminalToolRequest,
+    input: TerminalToolRequest,
     event_stream: ToolCallEventStream,
     cx: &mut AsyncApp,
 ) -> Result<String, String> {
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
-    if let Some(kind) = detect_head_tail_pipe(&input.command) {
-        let overridden = match kind {
-            HeadTailPipe::Head => input.selection.head_lines == Some(0),
-            HeadTailPipe::Tail => input.selection.tail_lines == Some(0),
-        };
-        if !overridden {
-            if let Some(replacement) = replace_head_tail_pipe(&input.command) {
-                input.command = replacement.new_command;
-                input.selection = TerminalOutputSelection {
-                    head_lines: match replacement.kind {
-                        HeadTailPipe::Head => Some(replacement.count),
-                        HeadTailPipe::Tail => None,
-                    },
-                    tail_lines: match replacement.kind {
-                        HeadTailPipe::Tail => Some(replacement.count),
-                        HeadTailPipe::Head => None,
-                    },
-                };
-            } else {
-                return Err(head_tail_pipe_error(kind));
-            }
-        }
+    let mut command = input.command;
+    if let Some(new_command) = replace_tail_pipe(&command) {
+        command = new_command;
     }
-
-    let selection = input.selection;
 
     let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) = cx.update(|cx| {
         let working_dir = project
@@ -463,9 +402,9 @@ async fn run_terminal_tool(
             .next()
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
         let context =
-            crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
+            crate::ToolPermissionContext::new(TerminalTool::NAME, vec![command.clone()]);
         let authorize =
-            event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
+            event_stream.authorize(SharedString::new(command.clone()), context, cx);
         let sandboxing =
             input.sandbox.is_some() && sandboxing_enabled_for_project(project.read(cx), cx);
         let is_local_project = project.read(cx).is_local();
@@ -817,7 +756,7 @@ async fn run_terminal_tool(
                     let decision = cx
                         .update(|cx| {
                             event_stream.authorize_sandbox_fallback(
-                                Some(input.command.clone()),
+                                Some(command.clone()),
                                 error.user_facing_message(),
                                 Some(error.docs_section().to_string()),
                                 retries,
@@ -876,11 +815,7 @@ async fn run_terminal_tool(
         None
     };
 
-    let output_byte_limit = if selection.is_enabled() {
-        None
-    } else {
-        Some(COMMAND_OUTPUT_LIMIT)
-    };
+    let output_byte_limit = Some(COMMAND_OUTPUT_LIMIT);
 
     // Create the terminal. On Windows the WSL sandbox can only report whether
     // it set up the environment once `wsl.exe` actually runs (its probe is
@@ -897,7 +832,7 @@ async fn run_terminal_tool(
         loop {
             let error = match environment
                 .create_terminal(
-                    input.command.clone(),
+                    command.clone(),
                     extra_env.clone(),
                     working_dir.clone(),
                     output_byte_limit,
@@ -963,7 +898,7 @@ async fn run_terminal_tool(
     #[cfg(not(target_os = "windows"))]
     let terminal = environment
         .create_terminal(
-            input.command.clone(),
+            command.clone(),
             extra_env,
             working_dir.clone(),
             output_byte_limit,
@@ -1070,7 +1005,7 @@ async fn run_terminal_tool(
 
     let output = terminal.current_output(cx).map_err(|e| e.to_string())?;
 
-    let result = process_content(output, &input.command, timed_out, user_stopped, selection);
+    let result = process_content(output, &command, timed_out, user_stopped);
     let notes = sandbox_note.into_iter().collect::<Vec<_>>();
     Ok(if notes.is_empty() {
         result
@@ -1223,52 +1158,6 @@ fn build_network_request(sandbox: &TerminalSandboxInput) -> Result<NetworkReques
     Ok(NetworkRequest::Hosts(patterns))
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct TerminalOutputSelection {
-    head_lines: Option<usize>,
-    tail_lines: Option<usize>,
-}
-
-impl TerminalOutputSelection {
-    fn is_enabled(self) -> bool {
-        self.head_lines.filter(|&lines| lines > 0).is_some()
-            || self.tail_lines.filter(|&lines| lines > 0).is_some()
-    }
-}
-
-fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection) -> String {
-    // A line count of zero means "no filtering": it is the override signal
-    // that lets a command pipe to `head`/`tail` directly without the tool
-    // additionally trimming the (already-filtered) output.
-    let head_lines = selection.head_lines.filter(|&lines| lines > 0);
-    let tail_lines = selection.tail_lines.filter(|&lines| lines > 0);
-    match (head_lines, tail_lines) {
-        (None, None) => output.to_string(),
-        (Some(head_lines), None) => output
-            .lines()
-            .take(head_lines)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        (None, Some(tail_lines)) => {
-            let lines = output.lines().collect::<Vec<_>>();
-            let start = lines.len().saturating_sub(tail_lines);
-            lines[start..].join("\n")
-        }
-        (Some(head_lines), Some(tail_lines)) => {
-            let lines = output.lines().collect::<Vec<_>>();
-            let head = lines
-                .iter()
-                .take(head_lines)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("\n");
-            let tail_start = lines.len().saturating_sub(tail_lines);
-            let tail = lines[tail_start..].join("\n");
-            format!("{head}\n\n{tail}")
-        }
-    }
-}
-
 /// Explanation appended to the model-facing result when a sandboxed command
 /// fails because it tried to use WSL's Windows interop (see
 /// [`wsl_interop_blocked`]).
@@ -1292,10 +1181,8 @@ fn process_content(
     command: &str,
     timed_out: bool,
     user_stopped: bool,
-    selection: TerminalOutputSelection,
 ) -> String {
     let content = output.output.trim();
-    let content = select_terminal_output_lines(content, selection);
     let is_empty = content.is_empty();
 
     // On Windows, recognize the kernel-style diagnostics WSL prints when a
@@ -1421,7 +1308,6 @@ mod tests {
             "cargo build",
             false,
             true,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1540,217 +1426,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_terminal_output_head_lines() {
-        let output = "one\ntwo\nthree\nfour";
-        let result = select_terminal_output_lines(
-            output,
-            TerminalOutputSelection {
-                head_lines: Some(2),
-                tail_lines: None,
-            },
-        );
-
-        assert_eq!(result, "one\ntwo");
-    }
-
-    #[test]
-    fn test_select_terminal_output_tail_lines() {
-        let output = "one\ntwo\nthree\nfour";
-        let result = select_terminal_output_lines(
-            output,
-            TerminalOutputSelection {
-                head_lines: None,
-                tail_lines: Some(2),
-            },
-        );
-
-        assert_eq!(result, "three\nfour");
-    }
-
-    #[test]
-    fn test_select_terminal_output_head_and_tail_lines() {
-        let output = "one\ntwo\nthree\nfour\nfive";
-        let result = select_terminal_output_lines(
-            output,
-            TerminalOutputSelection {
-                head_lines: Some(2),
-                tail_lines: Some(2),
-            },
-        );
-
-        assert_eq!(result, "one\ntwo\n\nfour\nfive");
-    }
-
-    #[test]
-    fn test_select_terminal_output_head_and_tail_lines_overlap() {
-        let output = "one\ntwo\nthree";
-        let result = select_terminal_output_lines(
-            output,
-            TerminalOutputSelection {
-                head_lines: Some(2),
-                tail_lines: Some(2),
-            },
-        );
-
-        assert_eq!(result, "one\ntwo\n\ntwo\nthree");
-    }
-
-    #[test]
-    fn test_select_terminal_output_treats_zero_lines_as_no_filter() {
-        let output = "one\ntwo\nthree";
-
-        assert_eq!(
-            select_terminal_output_lines(
-                output,
-                TerminalOutputSelection {
-                    head_lines: Some(0),
-                    tail_lines: None,
-                },
-            ),
-            "one\ntwo\nthree"
-        );
-        assert_eq!(
-            select_terminal_output_lines(
-                output,
-                TerminalOutputSelection {
-                    head_lines: None,
-                    tail_lines: Some(0),
-                },
-            ),
-            "one\ntwo\nthree"
-        );
-        assert_eq!(
-            select_terminal_output_lines(
-                output,
-                TerminalOutputSelection {
-                    head_lines: Some(0),
-                    tail_lines: Some(0),
-                },
-            ),
-            "one\ntwo\nthree"
-        );
-    }
-
-    #[test]
-    fn test_select_terminal_output_handles_unicode_without_trailing_newline() {
-        let output = "α\nβ\nγ";
-        let result = select_terminal_output_lines(
-            output,
-            TerminalOutputSelection {
-                head_lines: None,
-                tail_lines: Some(2),
-            },
-        );
-
-        assert_eq!(result, "β\nγ");
-    }
-
-    #[test]
-    fn test_process_content_filters_success_output_for_model() {
-        let output = acp::TerminalOutputResponse::new("one\ntwo\nthree\nfour".to_string(), false)
-            .exit_status(acp::TerminalExitStatus::new().exit_code(0));
-
-        let result = process_content(
-            output,
-            "printf lines",
-            false,
-            false,
-            TerminalOutputSelection {
-                head_lines: Some(1),
-                tail_lines: Some(1),
-            },
-        );
-
-        assert_eq!(result, "```\none\n\nfour\n```");
-    }
-
-    #[test]
-    fn test_process_content_filters_failure_output_for_model() {
-        let output = acp::TerminalOutputResponse::new("one\ntwo\nthree".to_string(), false)
-            .exit_status(acp::TerminalExitStatus::new().exit_code(1));
-
-        let result = process_content(
-            output,
-            "failing command",
-            false,
-            false,
-            TerminalOutputSelection {
-                head_lines: None,
-                tail_lines: Some(1),
-            },
-        );
-
-        assert!(result.contains("failed with exit code 1"));
-        assert!(result.contains("three"));
-        assert!(!result.contains("one"));
-        assert!(!result.contains("two"));
-    }
-
-    #[test]
-    fn test_process_content_filters_timeout_output_for_model() {
-        let output = acp::TerminalOutputResponse::new("one\ntwo\nthree".to_string(), false);
-
-        let result = process_content(
-            output,
-            "slow command",
-            true,
-            false,
-            TerminalOutputSelection {
-                head_lines: Some(1),
-                tail_lines: None,
-            },
-        );
-
-        assert!(result.contains("timed out"));
-        assert!(result.contains("one"));
-        assert!(!result.contains("two"));
-        assert!(!result.contains("three"));
-    }
-
-    #[test]
-    fn test_process_content_filters_user_stopped_output_for_model() {
-        let output = acp::TerminalOutputResponse::new("one\ntwo\nthree".to_string(), false);
-
-        let result = process_content(
-            output,
-            "stopped command",
-            false,
-            true,
-            TerminalOutputSelection {
-                head_lines: None,
-                tail_lines: Some(1),
-            },
-        );
-
-        assert!(result.contains("user stopped"));
-        assert!(result.contains("ask them what they would like to do"));
-        assert!(result.contains("three"));
-        assert!(!result.contains("one"));
-        assert!(!result.contains("two"));
-    }
-
-    #[test]
-    fn test_process_content_selected_output_has_no_explanatory_note() {
-        let output = acp::TerminalOutputResponse::new("one\ntwo\nthree".to_string(), false)
-            .exit_status(acp::TerminalExitStatus::new().exit_code(0));
-
-        let result = process_content(
-            output,
-            "printf lines",
-            false,
-            false,
-            TerminalOutputSelection {
-                head_lines: Some(1),
-                tail_lines: Some(1),
-            },
-        );
-
-        assert!(!result.contains("Showing"));
-        assert!(!result.contains("first"));
-        assert!(!result.contains("last"));
-    }
-
-    #[test]
     fn test_process_content_user_stopped_empty_output() {
         let output = acp::TerminalOutputResponse::new("".to_string(), false);
 
@@ -1759,7 +1434,6 @@ mod tests {
             "cargo build",
             false,
             true,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1783,7 +1457,6 @@ mod tests {
             "cargo build",
             true,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1807,7 +1480,6 @@ mod tests {
             "sleep 1000",
             true,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1832,7 +1504,6 @@ mod tests {
             "echo hello",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1857,7 +1528,6 @@ mod tests {
             "true",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1877,7 +1547,6 @@ mod tests {
             "false",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1902,7 +1571,6 @@ mod tests {
             "false",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1921,7 +1589,6 @@ mod tests {
             "some_command",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -1945,7 +1612,6 @@ mod tests {
             "some_command",
             false,
             false,
-            TerminalOutputSelection::default(),
         );
 
         assert!(
@@ -2219,66 +1885,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_run_filters_model_output_and_bypasses_byte_limit_when_head_or_tail_is_set(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        crate::tests::init_test(cx);
-
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let output =
-            acp::TerminalOutputResponse::new("one\ntwo\nthree\nfour\nfive".to_string(), false)
-                .exit_status(acp::TerminalExitStatus::new().exit_code(0));
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0)
-                    .with_output(output),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "printf lines".to_string(),
-                    timeout_ms: None,
-                    head_lines: Some(1),
-                    tail_lines: Some(1),
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        let update = rx.expect_update_fields().await;
-        assert!(
-            update.content.iter().any(|blocks| {
-                blocks
-                    .iter()
-                    .any(|content| matches!(content, acp::ToolCallContent::Terminal(_)))
-            }),
-            "expected terminal content update"
-        );
-
-        let result = task.await.expect("terminal command should succeed");
-        assert_eq!(result, "```\none\n\nfive\n```");
-        assert_eq!(environment.terminal_output_limits(), vec![None]);
-    }
-
-    #[gpui::test]
-    async fn test_run_uses_byte_limit_when_head_and_tail_are_not_set(
+    async fn test_run_uses_byte_limit(
         cx: &mut gpui::TestAppContext,
     ) {
         crate::tests::init_test(cx);
@@ -2449,32 +2056,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_terminal_tool_description_mentions_head_and_tail_parameters() {
-        let description = <TerminalTool as crate::AgentTool>::description().to_string();
-
-        assert!(description.contains("head_lines"));
-        assert!(description.contains("tail_lines"));
-        assert!(description.contains("Do not pipe output to `head`, `tail`, or similar"));
-        assert!(description.contains("visible to the user in real time"));
-        assert!(description.contains("waste tokens or exceed the context window"));
-    }
-
-    #[test]
-    fn test_terminal_tool_input_schema_mentions_head_and_tail_parameters() {
-        let schema = <TerminalTool as crate::AgentTool>::input_schema(
-            language_model::LanguageModelToolSchemaFormat::JsonSchema,
-        );
-        let schema_json = serde_json::to_value(schema).expect("schema should serialize");
-        let schema_text = schema_json.to_string();
-
-        assert!(schema_text.contains("head_lines"));
-        assert!(schema_text.contains("tail_lines"));
-        assert!(schema_text.contains("Do not pipe output to `head`"));
-        assert!(schema_text.contains("Do not pipe output to `tail`"));
-        assert!(schema_text.contains("waste tokens or exceed the context window"));
-    }
-
     async fn assert_rejected_before_terminal_creation(
         command: &str,
         cx: &mut gpui::TestAppContext,
@@ -2630,192 +2211,10 @@ mod tests {
         assert_rejected_before_terminal_creation("echo $(cat $(whoami).txt)", cx).await;
     }
 
-    async fn assert_head_tail_rejected_before_terminal_creation(
-        command: &str,
-        head_lines: Option<usize>,
-        tail_lines: Option<usize>,
+    #[gpui::test]
+    async fn test_auto_replaces_pipe_to_tail(
         cx: &mut gpui::TestAppContext,
     ) {
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default()
-                .with_terminal(crate::tests::FakeTerminalHandle::new_never_exits(cx))
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Confirm;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: command.to_string(),
-                    timeout_ms: None,
-                    head_lines,
-                    tail_lines,
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        let result = task.await;
-        let error = result.unwrap_err();
-        assert!(
-            error.contains("Don't pipe output to"),
-            "command {command:?} should be rejected with head/tail message, got: {error}"
-        );
-        assert!(
-            environment.terminal_creation_count() == 0,
-            "no terminal should be created for rejected command {command:?}"
-        );
-        assert!(
-            !matches!(
-                rx.try_recv(),
-                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
-            ),
-            "rejected command {command:?} should not request authorization"
-        );
-    }
-
-    #[gpui::test]
-    async fn test_auto_replaces_pipe_to_head(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | head".to_string(),
-                    timeout_ms: None,
-                    ..Default::default()
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("pipe to head should be auto-replaced, not rejected");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_auto_replaces_pipe_to_head_with_n(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | head -n 5".to_string(),
-                    timeout_ms: None,
-                    ..Default::default()
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("pipe to head should be auto-replaced, not rejected");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_auto_replaces_pipe_to_head_with_dash_n(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | head -5".to_string(),
-                    timeout_ms: None,
-                    ..Default::default()
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("pipe to head should be auto-replaced, not rejected");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_auto_replaces_pipe_to_tail(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/root", serde_json::json!({})).await;
@@ -2852,97 +2251,14 @@ mod tests {
 
         rx.expect_update_fields().await;
         task.await
-            .expect("pipe to tail should be auto-replaced, not rejected");
+            .expect("pipe to tail should be auto-replaced");
         assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_auto_replaces_pwd_pipe_to_tail(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "pwd | tail".to_string(),
-                    timeout_ms: None,
-                    ..Default::default()
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("pipe to tail should be auto-replaced, not rejected");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_pwd_without_pipe_is_allowed(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "pwd".to_string(),
-                    timeout_ms: None,
-                    ..Default::default()
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await.expect("a bare `pwd` should not be rejected");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_auto_replaces_pipe_to_tail_with_n(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_tail_with_n(
+        cx: &mut gpui::TestAppContext,
+    ) {
         crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/root", serde_json::json!({})).await;
@@ -2979,12 +2295,14 @@ mod tests {
 
         rx.expect_update_fields().await;
         task.await
-            .expect("pipe to tail should be auto-replaced, not rejected");
+            .expect("pipe to tail should be auto-replaced");
         assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_auto_replaces_pipe_to_tail_with_dash_n(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pipe_to_tail_with_dash_n(
+        cx: &mut gpui::TestAppContext,
+    ) {
         crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/root", serde_json::json!({})).await;
@@ -3021,12 +2339,14 @@ mod tests {
 
         rx.expect_update_fields().await;
         task.await
-            .expect("pipe to tail should be auto-replaced, not rejected");
+            .expect("pipe to tail should be auto-replaced");
         assert_eq!(environment.terminal_creation_count(), 1);
     }
 
     #[gpui::test]
-    async fn test_auto_replaces_pipe_to_head_when_override_is_for_tail(cx: &mut gpui::TestAppContext) {
+    async fn test_auto_replaces_pwd_pipe_to_tail(
+        cx: &mut gpui::TestAppContext,
+    ) {
         crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/root", serde_json::json!({})).await;
@@ -3052,10 +2372,9 @@ mod tests {
         let task = cx.update(|cx| {
             tool.run(
                 crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | head".to_string(),
+                    command: "pwd | tail".to_string(),
                     timeout_ms: None,
-                    head_lines: None,
-                    tail_lines: Some(0),
+                    ..Default::default()
                 }),
                 event_stream,
                 cx,
@@ -3064,109 +2383,7 @@ mod tests {
 
         rx.expect_update_fields().await;
         task.await
-            .expect("pipe to head should be auto-replaced even when override is for tail");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_rejects_pipe_to_head_when_in_middle_of_semicolon(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cmd1 | head -5; cmd2", None, None, cx)
-            .await;
-    }
-
-    #[gpui::test]
-    async fn test_rejects_pipe_to_head_when_followed_by_and_or(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-        assert_head_tail_rejected_before_terminal_creation("cat foo | head && echo done", None, None, cx)
-            .await;
-    }
-
-    #[gpui::test]
-    async fn test_allows_pipe_to_head_with_head_lines_zero_override(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | head -n 5".to_string(),
-                    timeout_ms: None,
-                    head_lines: Some(0),
-                    tail_lines: None,
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("head pipe with head_lines: 0 override should proceed");
-        assert_eq!(environment.terminal_creation_count(), 1);
-    }
-
-    #[gpui::test]
-    async fn test_allows_pipe_to_tail_with_tail_lines_zero_override(cx: &mut gpui::TestAppContext) {
-        crate::tests::init_test(cx);
-
-        let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/root", serde_json::json!({})).await;
-        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
-
-        let environment = std::rc::Rc::new(cx.update(|cx| {
-            crate::tests::FakeThreadEnvironment::default().with_terminal(
-                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
-            )
-        }));
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            settings.tool_permissions.tools.remove(TerminalTool::NAME);
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
-        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
-
-        let task = cx.update(|cx| {
-            tool.run(
-                crate::ToolInput::resolved(TerminalToolInput {
-                    command: "cat foo | tail -n 5".to_string(),
-                    timeout_ms: None,
-                    head_lines: None,
-                    tail_lines: Some(0),
-                }),
-                event_stream,
-                cx,
-            )
-        });
-
-        rx.expect_update_fields().await;
-        task.await
-            .expect("tail pipe with tail_lines: 0 override should proceed");
+            .expect("pipe to tail should be auto-replaced");
         assert_eq!(environment.terminal_creation_count(), 1);
     }
 
