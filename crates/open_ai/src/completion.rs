@@ -820,11 +820,13 @@ impl OpenAiEventMapper {
             let cache_creation_input_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
-                .map_or(0, |details| details.cache_write_tokens);
+                .and_then(|details| details.cache_write_tokens)
+                .unwrap_or(0);
             let cache_read_input_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
-                .map_or(0, |details| details.cached_tokens);
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0);
             events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
                 input_tokens: prompt_tokens
                     .saturating_sub(cache_creation_input_tokens)
@@ -4288,6 +4290,36 @@ mod tests {
                     output_tokens: 500,
                     cache_creation_input_tokens: 1_000,
                     cache_read_input_tokens: 6_000,
+                })
+            )
+        }));
+    }
+
+    #[test]
+    fn usage_with_null_cache_write_tokens_maps_to_zero() {
+        let response_events = serde_json::from_value(json!([{
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 52244,
+                "completion_tokens": 577,
+                "total_tokens": 52821,
+                "prompt_tokens_details": {
+                    "cached_tokens": 48384,
+                    "cache_write_tokens": null
+                }
+            }
+        }]))
+        .expect("usage chunk with null cache_write_tokens should parse");
+        let events = map_completion_events(response_events);
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
+                    input_tokens: 3_860,
+                    output_tokens: 577,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 48_384,
                 })
             )
         }));
