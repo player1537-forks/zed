@@ -756,11 +756,13 @@ impl OpenRouterEventMapper {
             let cache_creation_input_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
-                .map_or(0, |details| details.cache_write_tokens);
+                .and_then(|details| details.cache_write_tokens)
+                .unwrap_or(0);
             let cache_read_input_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
-                .map_or(0, |details| details.cached_tokens);
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0);
             let input_tokens = usage.prompt_tokens.saturating_sub(
                 cache_creation_input_tokens.saturating_add(cache_read_input_tokens),
             );
@@ -1064,8 +1066,8 @@ mod tests {
                 completion_tokens: 7,
                 total_tokens: 19,
                 prompt_tokens_details: Some(open_router::PromptTokensDetails {
-                    cached_tokens: 5,
-                    cache_write_tokens: 3,
+                    cached_tokens: Some(5),
+                    cache_write_tokens: Some(3),
                 }),
             }),
         });

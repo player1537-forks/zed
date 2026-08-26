@@ -410,9 +410,9 @@ pub struct FunctionChunk {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct PromptTokensDetails {
     #[serde(default)]
-    pub cached_tokens: u64,
+    pub cached_tokens: Option<u64>,
     #[serde(default)]
-    pub cache_write_tokens: u64,
+    pub cache_write_tokens: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -932,6 +932,58 @@ mod tests {
         assert_eq!(headers["http-referer"], "https://zed.dev");
         assert_eq!(headers["x-title"], OPEN_ROUTER_APP_TITLE);
         assert_eq!(headers["x-custom-header"], "custom-value");
+    }
+
+    #[test]
+    fn stream_accepts_usage_chunk_with_null_cache_write_tokens() {
+        let client = FakeHttpClient::create(move |_request| async move {
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from(concat!(
+                    "data: {\"id\":\"chatcmpl-R3yvfCfkTDxlPRJmUP0lUWCv\",\"object\":\"chat.completion.chunk\",\"created\":1787758374,\"model\":\"deepseek-v4-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":52244,\"completion_tokens\":577,\"total_tokens\":52821,\"prompt_tokens_details\":{\"cached_tokens\":48384,\"cache_write_tokens\":null}}}\n\n",
+                    "data: [DONE]\n\n"
+                )))?)
+        });
+        let request = Request {
+            model: "vendor/model".to_string(),
+            messages: vec![RequestMessage::User {
+                content: MessageContent::Plain("Hello".to_string()),
+            }],
+            stream: true,
+            session_id: None,
+            max_tokens: None,
+            stop: Vec::new(),
+            temperature: 0.4,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            tools: Vec::new(),
+            reasoning: None,
+            usage: RequestUsage { include: true },
+            provider: None,
+        };
+
+        let responses = block_on(async {
+            stream_completion(
+                client.as_ref(),
+                OPEN_ROUTER_API_URL,
+                "secret",
+                request,
+                &CustomHeaders::default(),
+            )
+            .await
+            .expect("streaming request")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("no stream errors")
+        });
+
+        assert_eq!(responses.len(), 1);
+        let usage = responses[0].usage.as_ref().expect("usage");
+        let details = usage.prompt_tokens_details.as_ref().expect("details");
+        assert_eq!(details.cached_tokens, Some(48384));
+        assert_eq!(details.cache_write_tokens, None);
     }
 
     #[test]
