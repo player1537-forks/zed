@@ -444,7 +444,7 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ReasoningEffort};
+    use super::{Deserialize, Model, ReasoningEffort, ResponseStreamResult};
 
     #[test]
     fn gpt_5_1_uses_none_reasoning_by_default() {
@@ -463,6 +463,38 @@ mod tests {
             Model::FivePointOne.supported_reasoning_efforts(),
             expected_efforts.as_slice()
         );
+    }
+
+    #[test]
+    fn stream_chunk_with_null_cache_write_tokens_deserializes() {
+        // DeepSeek reports `cache_write_tokens` as `null` when no cache writes
+        // occurred this turn; the chunk must still parse as a completion event.
+        let payload = serde_json::json!({
+            "id": "chatcmpl-R3yvfCfkTDxlPRJmUP0lUWCv",
+            "object": "chat.completion.chunk",
+            "created": 1787758374,
+            "model": "deepseek-v4-flash",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 52244,
+                "completion_tokens": 577,
+                "total_tokens": 52821,
+                "prompt_tokens_details": {
+                    "cached_tokens": 48384,
+                    "cache_write_tokens": null
+                }
+            }
+        });
+
+        let ResponseStreamResult::Ok(event) =
+            ResponseStreamResult::deserialize(&payload).expect("chunk should parse")
+        else {
+            panic!("expected a completion chunk, got an error variant");
+        };
+        let usage = event.usage.expect("usage should be present");
+        let details = usage.prompt_tokens_details.expect("details should be present");
+        assert_eq!(details.cached_tokens, Some(48384));
+        assert_eq!(details.cache_write_tokens, None);
     }
 
     #[test]
@@ -751,14 +783,17 @@ pub struct FunctionChunk {
 }
 
 /// Reports prompt-cache token usage from compatible providers.
+///
+/// Providers (e.g. DeepSeek) emit `null` for fields that were not reported
+/// this turn, so each entry is optional.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct PromptTokensDetails {
     /// Tokens read from a prompt cache.
     #[serde(default)]
-    pub cached_tokens: u64,
+    pub cached_tokens: Option<u64>,
     /// Tokens written to a prompt cache.
     #[serde(default)]
-    pub cache_write_tokens: u64,
+    pub cache_write_tokens: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
