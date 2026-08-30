@@ -142,13 +142,10 @@ impl AgentTool for GrepTool {
                 )
                 .map_err(|error| format!("invalid include glob pattern: {error}"))?;
 
-                // Exclude global file_scan_exclusions and private_files settings
+                // Exclude global file_scan_exclusions setting
                 let exclude_matcher = {
                     let global_settings = WorktreeSettings::get_global(cx);
-                    let exclude_patterns = global_settings
-                        .file_scan_exclusions
-                        .sources()
-                        .chain(global_settings.private_files.sources());
+                    let exclude_patterns = global_settings.file_scan_exclusions.sources();
 
                     PathMatcher::new(exclude_patterns, path_style)
                         .map_err(|error| format!("invalid exclude pattern: {error}"))?
@@ -229,7 +226,6 @@ impl AgentTool for GrepTool {
                 if cx.update(|cx| {
                     let worktree_settings = WorktreeSettings::get(Some((&project_path).into()), cx);
                     worktree_settings.is_path_excluded(&project_path.path)
-                        || worktree_settings.is_path_private(&project_path.path)
                 }) {
                     continue;
                 }
@@ -1072,14 +1068,6 @@ mod tests {
                         "**/.secretdir".to_string(),
                         "**/.mymetadata".to_string(),
                     ]));
-                    settings.project.worktree.private_files = Some(
-                        vec![
-                            "**/.mysecrets".to_string(),
-                            "**/*.privatekey".to_string(),
-                            "**/*.mysensitive".to_string(),
-                        ]
-                        .into(),
-                    );
                 });
             });
         });
@@ -1157,24 +1145,7 @@ mod tests {
             "grep_tool should not search .mymetadata files (file_scan_exclusions)"
         );
 
-        // Searching private files should return no results
-        let result = run_grep_tool(
-            GrepToolInput {
-                regex: "SECRET_KEY".to_string(),
-                include_pattern: None,
-                offset: 0,
-                case_sensitive: false,
-            },
-            project.clone(),
-            cx,
-        )
-        .await;
-        let paths = extract_paths_from_results(&result);
-        assert!(
-            paths.is_empty(),
-            "grep_tool should not search .mysecrets (private_files)"
-        );
-
+        // Private files are no longer excluded from search
         let result = run_grep_tool(
             GrepToolInput {
                 regex: "private_key_content".to_string(),
@@ -1187,30 +1158,12 @@ mod tests {
         )
         .await;
         let paths = extract_paths_from_results(&result);
-
         assert!(
-            paths.is_empty(),
-            "grep_tool should not search .privatekey files (private_files)"
+            paths.iter().any(|p| p.contains("special.privatekey")),
+            "grep_tool should be able to search private files"
         );
 
-        let result = run_grep_tool(
-            GrepToolInput {
-                regex: "sensitive_data".to_string(),
-                include_pattern: None,
-                offset: 0,
-                case_sensitive: false,
-            },
-            project.clone(),
-            cx,
-        )
-        .await;
-        let paths = extract_paths_from_results(&result);
-        assert!(
-            paths.is_empty(),
-            "grep_tool should not search .mysensitive files (private_files)"
-        );
-
-        // Searching a normal file should still work, even with private_files configured
+        // Searching a normal file should still work
         let result = run_grep_tool(
             GrepToolInput {
                 regex: "normal_file_content".to_string(),
@@ -1253,14 +1206,13 @@ mod tests {
 
         let fs = FakeFs::new(cx.executor());
 
-        // Create first worktree with its own private files
+        // Create first worktree with its own settings
         fs.insert_tree(
             path!("/worktree1"),
             json!({
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/fixture.*"],
-                        "private_files": ["**/secret.rs"]
+                        "file_scan_exclusions": ["**/fixture.*"]
                     }"#
                 },
                 "src": {
@@ -1276,14 +1228,13 @@ mod tests {
         )
         .await;
 
-        // Create second worktree with different private files
+        // Create second worktree with different settings
         fs.insert_tree(
             path!("/worktree2"),
             json!({
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/internal.*"],
-                        "private_files": ["**/private.js", "**/data.json"]
+                        "file_scan_exclusions": ["**/internal.*"]
                     }"#
                 },
                 "lib": {
@@ -1307,8 +1258,6 @@ mod tests {
                         "**/.git".to_string(),
                         "**/node_modules".to_string(),
                     ]));
-                    settings.project.worktree.private_files =
-                        Some(vec!["**/.env".to_string()].into());
                 });
             });
         });
@@ -1355,26 +1304,27 @@ mod tests {
             "Should find 'secret' in worktree2/docs/README.md"
         );
 
-        // Should NOT find matches in private/excluded files based on worktree settings
-        assert!(
-            !paths.iter().any(|p| p.contains("secret.rs")),
-            "Should not search in worktree1/src/secret.rs (local private_files)"
-        );
+        // Should NOT find matches in excluded files based on worktree settings
         assert!(
             !paths.iter().any(|p| p.contains("fixture.sql")),
             "Should not search in worktree1/tests/fixture.sql (local file_scan_exclusions)"
         );
         assert!(
-            !paths.iter().any(|p| p.contains("private.js")),
-            "Should not search in worktree2/lib/private.js (local private_files)"
-        );
-        assert!(
-            !paths.iter().any(|p| p.contains("data.json")),
-            "Should not search in worktree2/lib/data.json (local private_files)"
-        );
-        assert!(
             !paths.iter().any(|p| p.contains("internal.md")),
             "Should not search in worktree2/docs/internal.md (local file_scan_exclusions)"
+        );
+        // Private files are no longer excluded from search
+        assert!(
+            paths.iter().any(|p| p.contains("secret.rs")),
+            "Should search in worktree1/src/secret.rs (private_files no longer excluded)"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("private.js")),
+            "Should search in worktree2/lib/private.js (private_files no longer excluded)"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("data.json")),
+            "Should search in worktree2/lib/data.json (private_files no longer excluded)"
         );
 
         // Test with `include_pattern` specific to one worktree
@@ -1392,7 +1342,7 @@ mod tests {
 
         let paths = extract_paths_from_results(&result);
 
-        // Should only find matches in worktree1 *.rs files (excluding private ones)
+        // Should find matches in all worktree1 *.rs files
         assert!(
             paths.iter().any(|p| p.contains("main.rs")),
             "Should find match in worktree1/src/main.rs"
@@ -1402,8 +1352,8 @@ mod tests {
             "Should find match in worktree1/tests/test.rs"
         );
         assert!(
-            !paths.iter().any(|p| p.contains("secret.rs")),
-            "Should not find match in excluded worktree1/src/secret.rs"
+            paths.iter().any(|p| p.contains("secret.rs")),
+            "Should find match in worktree1/src/secret.rs"
         );
         assert!(
             paths.iter().all(|p| !p.contains("worktree2")),

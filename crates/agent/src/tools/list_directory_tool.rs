@@ -135,17 +135,13 @@ impl ListDirectoryTool {
         let mut files = Vec::new();
 
         for entry in worktree_snapshot.child_entries(&project_path.path) {
-            // Skip private and excluded files and directories
-            if global_settings.is_path_private(&entry.path)
-                || global_settings.is_path_excluded(&entry.path)
-            {
+            // Skip excluded files and directories
+            if global_settings.is_path_excluded(&entry.path) {
                 continue;
             }
 
             let project_path: ProjectPath = (worktree_snapshot.id(), entry.path.clone()).into();
-            if worktree_settings.is_path_excluded(&project_path.path)
-                || worktree_settings.is_path_private(&project_path.path)
-            {
+            if worktree_settings.is_path_excluded(&project_path.path) {
                 continue;
             }
 
@@ -281,24 +277,10 @@ impl AgentTool for ListDirectoryTool {
                     );
                 }
 
-                if global_settings.is_path_private(&project_path.path) {
-                    anyhow::bail!(
-                        "Cannot list directory because its path matches the user's global `private_files` setting: {}",
-                        input.path
-                    );
-                }
-
                 let worktree_settings = WorktreeSettings::get(Some((&project_path).into()), cx);
                 if worktree_settings.is_path_excluded(&project_path.path) {
                     anyhow::bail!(
                         "Cannot list directory because its path matches the user's worktree `file_scan_exclusions` setting: {}",
-                        input.path
-                    );
-                }
-
-                if worktree_settings.is_path_private(&project_path.path) {
-                    anyhow::bail!(
-                        "Cannot list directory because its path matches the user's worktree `private_paths` setting: {}",
                         input.path
                     );
                 }
@@ -583,14 +565,6 @@ mod tests {
                         "**/.mymetadata".to_string(),
                         "**/.hidden_subdir".to_string(),
                     ]));
-                    settings.project.worktree.private_files = Some(
-                        vec![
-                            "**/.mysecrets".to_string(),
-                            "**/*.privatekey".to_string(),
-                            "**/*.mysensitive".to_string(),
-                        ]
-                        .into(),
-                    );
                 });
             });
         });
@@ -598,7 +572,7 @@ mod tests {
         let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
         let tool = Arc::new(ListDirectoryTool::new(project));
 
-        // Listing root directory should exclude private and excluded files
+        // Listing root directory should exclude excluded files, but private files are no longer excluded
         let input = ListDirectoryToolInput {
             path: "project".into(),
         };
@@ -617,7 +591,7 @@ mod tests {
         assert!(output.contains("normal_dir"), "Should list normal_dir");
         assert!(output.contains("visible_dir"), "Should list visible_dir");
 
-        // Should NOT include excluded or private files
+        // Should NOT include excluded files
         assert!(
             !output.contains(".secretdir"),
             "Should not list .secretdir (file_scan_exclusions)"
@@ -627,8 +601,8 @@ mod tests {
             "Should not list .mymetadata (file_scan_exclusions)"
         );
         assert!(
-            !output.contains(".mysecrets"),
-            "Should not list .mysecrets (private_files)"
+            output.contains(".mysecrets"),
+            "Should list .mysecrets (private_files no longer excluded)"
         );
 
         // Trying to list an excluded directory should fail
@@ -649,7 +623,7 @@ mod tests {
             "Error should mention file_scan_exclusions"
         );
 
-        // Listing a directory should exclude private files within it
+        // Listing a directory should now include previously-private files
         let input = ListDirectoryToolInput {
             path: "project/visible_dir".into(),
         };
@@ -667,14 +641,14 @@ mod tests {
         // Should include normal files
         assert!(output.contains("normal.txt"), "Should list normal.txt");
 
-        // Should NOT include private files
+        // Private files are no longer excluded
         assert!(
-            !output.contains("privatekey"),
-            "Should not list .privatekey files (private_files)"
+            output.contains("privatekey"),
+            "Should list .privatekey files (private_files no longer excluded)"
         );
         assert!(
-            !output.contains("mysensitive"),
-            "Should not list .mysensitive files (private_files)"
+            output.contains("mysensitive"),
+            "Should list .mysensitive files (private_files no longer excluded)"
         );
 
         // Should NOT include subdirectories that match exclusions
@@ -690,14 +664,13 @@ mod tests {
 
         let fs = FakeFs::new(cx.executor());
 
-        // Create first worktree with its own private files
+        // Create first worktree with its own settings
         fs.insert_tree(
             path!("/worktree1"),
             json!({
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/fixture.*"],
-                        "private_files": ["**/secret.rs", "**/config.toml"]
+                        "file_scan_exclusions": ["**/fixture.*"]
                     }"#
                 },
                 "src": {
@@ -713,14 +686,13 @@ mod tests {
         )
         .await;
 
-        // Create second worktree with different private files
+        // Create second worktree with different settings
         fs.insert_tree(
             path!("/worktree2"),
             json!({
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/internal.*"],
-                        "private_files": ["**/private.js", "**/data.json"]
+                        "file_scan_exclusions": ["**/internal.*"]
                     }"#
                 },
                 "lib": {
@@ -744,8 +716,6 @@ mod tests {
                         "**/.git".to_string(),
                         "**/node_modules".to_string(),
                     ]));
-                    settings.project.worktree.private_files =
-                        Some(vec!["**/.env".to_string()].into());
                 });
             });
         });
@@ -762,7 +732,7 @@ mod tests {
 
         let tool = Arc::new(ListDirectoryTool::new(project));
 
-        // Test listing worktree1/src - should exclude secret.rs and config.toml based on local settings
+        // Test listing worktree1/src - files previously listed as private are now listed
         let input = ListDirectoryToolInput {
             path: "worktree1/src".into(),
         };
@@ -778,12 +748,12 @@ mod tests {
             .unwrap();
         assert!(output.contains("main.rs"), "Should list main.rs");
         assert!(
-            !output.contains("secret.rs"),
-            "Should not list secret.rs (local private_files)"
+            output.contains("secret.rs"),
+            "Should list secret.rs (private_files no longer excluded)"
         );
         assert!(
-            !output.contains("config.toml"),
-            "Should not list config.toml (local private_files)"
+            output.contains("config.toml"),
+            "Should list config.toml (private_files no longer excluded)"
         );
 
         // Test listing worktree1/tests - should exclude fixture.sql based on local settings
@@ -806,7 +776,7 @@ mod tests {
             "Should not list fixture.sql (local file_scan_exclusions)"
         );
 
-        // Test listing worktree2/lib - should exclude private.js and data.json based on local settings
+        // Test listing worktree2/lib - files previously listed as private are now listed
         let input = ListDirectoryToolInput {
             path: "worktree2/lib".into(),
         };
@@ -822,12 +792,12 @@ mod tests {
             .unwrap();
         assert!(output.contains("public.js"), "Should list public.js");
         assert!(
-            !output.contains("private.js"),
-            "Should not list private.js (local private_files)"
+            output.contains("private.js"),
+            "Should list private.js (private_files no longer excluded)"
         );
         assert!(
-            !output.contains("data.json"),
-            "Should not list data.json (local private_files)"
+            output.contains("data.json"),
+            "Should list data.json (private_files no longer excluded)"
         );
 
         // Test listing worktree2/docs - should exclude internal.md based on local settings
@@ -850,7 +820,7 @@ mod tests {
             "Should not list internal.md (local file_scan_exclusions)"
         );
 
-        // Test trying to list an excluded directory directly
+        // Test trying to list a file directly should fail
         let input = ListDirectoryToolInput {
             path: "worktree1/src/secret.rs".into(),
         };
@@ -863,7 +833,7 @@ mod tests {
                 )
             })
             .await;
-        assert!(output.unwrap_err().contains("Cannot list directory"),);
+        assert!(output.unwrap_err().contains("is not a directory"),);
     }
 
     #[gpui::test]
@@ -988,7 +958,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_list_directory_symlink_escape_private_path_no_authorization(
+    async fn test_list_directory_symlink_escape_excluded_path_no_authorization(
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
@@ -1019,8 +989,9 @@ mod tests {
         cx.update(|cx| {
             SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.project.worktree.private_files =
-                        Some(vec!["**/link_to_external".to_string()].into());
+                    settings.project.worktree.file_scan_exclusions = Some(
+                        SplicingVec::from(vec!["**/link_to_external".to_string()]),
+                    );
                 });
             });
         });
@@ -1045,12 +1016,12 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "Expected list_directory to fail on private path"
+            "Expected list_directory to fail on excluded path"
         );
         let error = result.unwrap_err();
         assert!(
-            error.contains("private"),
-            "Expected private path validation error, got: {error}"
+            error.contains("file_scan_exclusions"),
+            "Expected file_scan_exclusions validation error, got: {error}"
         );
 
         let event = event_rx.try_recv();

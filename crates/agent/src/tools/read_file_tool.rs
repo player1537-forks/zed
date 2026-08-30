@@ -308,24 +308,10 @@ impl AgentTool for ReadFileTool {
                     );
                 }
 
-                if global_settings.is_path_private(&project_path.path) {
-                    anyhow::bail!(
-                        "Cannot read file because its path matches the global `private_files` setting: {}",
-                        input.path
-                    );
-                }
-
                 let worktree_settings = WorktreeSettings::get(Some((&project_path).into()), cx);
                 if worktree_settings.is_path_excluded(&project_path.path) {
                     anyhow::bail!(
                         "Cannot read file because its path matches the worktree `file_scan_exclusions` setting: {}",
-                        input.path
-                    );
-                }
-
-                if worktree_settings.is_path_private(&project_path.path) {
-                    anyhow::bail!(
-                        "Cannot read file because its path matches the worktree `private_files` setting: {}",
                         input.path
                     );
                 }
@@ -1055,14 +1041,6 @@ mod test {
                         "**/.secretdir".to_string(),
                         "**/.mymetadata".to_string(),
                     ]));
-                    settings.project.worktree.private_files = Some(
-                        vec![
-                            "**/.mysecrets".to_string(),
-                            "**/*.privatekey".to_string(),
-                            "**/*.mysensitive".to_string(),
-                        ]
-                        .into(),
-                    );
                 });
             });
         });
@@ -1150,65 +1128,33 @@ mod test {
             "read_file_tool should error when attempting to read .mymetadata files (file_scan_exclusions)"
         );
 
-        // Reading private files should fail
-        let result = cx
-            .update(|cx| {
-                let input = ReadFileToolInput {
-                    path: "project_root/.mysecrets".to_string(),
-                    start_line: None,
-                    end_line: None,
-                };
-                tool.clone().run(
-                    ToolInput::resolved(input),
-                    ToolCallEventStream::test().0,
-                    cx,
-                )
-            })
-            .await;
-        assert!(
-            result.is_err(),
-            "read_file_tool should error when attempting to read .mysecrets (private_files)"
-        );
+        // Private files are no longer excluded and can be read
+        for private_path in [
+            "project_root/.mysecrets",
+            "project_root/subdir/special.privatekey",
+            "project_root/subdir/data.mysensitive",
+        ] {
+            let result = cx
+                .update(|cx| {
+                    let input = ReadFileToolInput {
+                        path: private_path.to_string(),
+                        start_line: None,
+                        end_line: None,
+                    };
+                    tool.clone().run(
+                        ToolInput::resolved(input),
+                        ToolCallEventStream::test().0,
+                        cx,
+                    )
+                })
+                .await;
+            assert!(
+                result.is_ok(),
+                "read_file_tool should be able to read private file {private_path}"
+            );
+        }
 
-        let result = cx
-            .update(|cx| {
-                let input = ReadFileToolInput {
-                    path: "project_root/subdir/special.privatekey".to_string(),
-                    start_line: None,
-                    end_line: None,
-                };
-                tool.clone().run(
-                    ToolInput::resolved(input),
-                    ToolCallEventStream::test().0,
-                    cx,
-                )
-            })
-            .await;
-        assert!(
-            result.is_err(),
-            "read_file_tool should error when attempting to read .privatekey files (private_files)"
-        );
-
-        let result = cx
-            .update(|cx| {
-                let input = ReadFileToolInput {
-                    path: "project_root/subdir/data.mysensitive".to_string(),
-                    start_line: None,
-                    end_line: None,
-                };
-                tool.clone().run(
-                    ToolInput::resolved(input),
-                    ToolCallEventStream::test().0,
-                    cx,
-                )
-            })
-            .await;
-        assert!(
-            result.is_err(),
-            "read_file_tool should error when attempting to read .mysensitive files (private_files)"
-        );
-
-        // Reading a normal file should still work, even with private_files configured
+        // Reading a normal file should still work
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -1307,7 +1253,7 @@ mod test {
 
         let fs = FakeFs::new(cx.executor());
 
-        // Create first worktree with its own private_files setting
+        // Create first worktree with its own settings
         fs.insert_tree(
             path!("/worktree1"),
             json!({
@@ -1322,15 +1268,14 @@ mod test {
                 },
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/fixture.*"],
-                        "private_files": ["**/secret.rs", "**/config.toml"]
+                        "file_scan_exclusions": ["**/fixture.*"]
                     }"#
                 }
             }),
         )
         .await;
 
-        // Create second worktree with different private_files setting
+        // Create second worktree with different settings
         fs.insert_tree(
             path!("/worktree2"),
             json!({
@@ -1345,8 +1290,7 @@ mod test {
                 },
                 ".zed": {
                     "settings.json": r#"{
-                        "file_scan_exclusions": ["**/internal.*"],
-                        "private_files": ["**/private.js", "**/data.json"]
+                        "file_scan_exclusions": ["**/internal.*"]
                     }"#
                 }
             }),
@@ -1361,8 +1305,6 @@ mod test {
                         "**/.git".to_string(),
                         "**/node_modules".to_string(),
                     ]));
-                    settings.project.worktree.private_files =
-                        Some(vec!["**/.env".to_string()].into());
                 });
             });
         });
@@ -1399,7 +1341,7 @@ mod test {
             "     1\tfn main() { println!(\"Hello from worktree1\"); }".into()
         );
 
-        // Test reading private file in worktree1 should fail
+        // Test reading a formerly-private file in worktree1 now succeeds
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -1415,11 +1357,7 @@ mod test {
             })
             .await;
 
-        assert!(result.is_err());
-        assert!(
-            error_text(result.unwrap_err()).contains("worktree `private_files` setting"),
-            "Error should mention worktree private_files setting"
-        );
+        assert!(result.is_ok());
 
         // Test reading excluded file in worktree1 should fail
         let result = cx
@@ -1465,7 +1403,7 @@ mod test {
             "     1\texport function greet() { return 'Hello from worktree2'; }".into()
         );
 
-        // Test reading private file in worktree2 should fail
+        // Test reading a formerly-private file in worktree2 now succeeds
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -1481,11 +1419,7 @@ mod test {
             })
             .await;
 
-        assert!(result.is_err());
-        assert!(
-            error_text(result.unwrap_err()).contains("worktree `private_files` setting"),
-            "Error should mention worktree private_files setting"
-        );
+        assert!(result.is_ok());
 
         // Test reading excluded file in worktree2 should fail
         let result = cx
@@ -1509,8 +1443,7 @@ mod test {
             "Error should mention worktree file_scan_exclusions setting"
         );
 
-        // Test that files allowed in one worktree but not in another are handled correctly
-        // (e.g., config.toml is private in worktree1 but doesn't exist in worktree2)
+        // config.toml is no longer private and should be readable in worktree1
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -1526,11 +1459,7 @@ mod test {
             })
             .await;
 
-        assert!(result.is_err());
-        assert!(
-            error_text(result.unwrap_err()).contains("worktree `private_files` setting"),
-            "Config.toml should be blocked by worktree1's private_files setting"
-        );
+        assert!(result.is_ok());
     }
 
     #[gpui::test]
@@ -1650,7 +1579,7 @@ mod test {
     }
 
     #[gpui::test]
-    async fn test_read_file_symlink_escape_private_path_no_authorization(cx: &mut TestAppContext) {
+    async fn test_read_file_symlink_escape_excluded_path_no_authorization(cx: &mut TestAppContext) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1677,8 +1606,9 @@ mod test {
         cx.update(|cx| {
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.project.worktree.private_files =
-                        Some(vec!["**/secret_link.txt".to_string()].into());
+                    settings.project.worktree.file_scan_exclusions = Some(
+                        SplicingVec::from(vec!["**/secret_link.txt".to_string()]),
+                    );
                 });
             });
         });
@@ -1706,12 +1636,12 @@ mod test {
 
         assert!(
             result.is_err(),
-            "Expected read_file to fail on private path"
+            "Expected read_file to fail on excluded path"
         );
         let error = error_text(result.unwrap_err());
         assert!(
-            error.contains("private_files"),
-            "Expected private-files validation error, got: {error}"
+            error.contains("file_scan_exclusions"),
+            "Expected file_scan_exclusions validation error, got: {error}"
         );
 
         let event = event_rx.try_recv();
